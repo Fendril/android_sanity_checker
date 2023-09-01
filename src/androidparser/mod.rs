@@ -5,7 +5,7 @@ use sqlite::{self, Connection, State};
 pub struct AndroidParser {
     path_filename: String,
 }
-
+//
 impl AndroidParser {
 
     pub fn new(get_this_file: &path::Path) -> Result<Self, Error> {
