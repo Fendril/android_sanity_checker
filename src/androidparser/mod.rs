@@ -1,11 +1,11 @@
-use std::{io::{self, BufRead, Error}, fs, path};
+use std::{io::{self, BufRead, Error, Write}, fs, path};
 use regex::Regex;
 use sqlite::{self, Connection, State};
 
 pub struct AndroidParser {
     path_filename: String,
 }
-//
+
 impl AndroidParser {
 
     pub fn new(get_this_file: &path::Path) -> Result<Self, Error> {
@@ -41,6 +41,26 @@ impl AndroidParser {
         };
     }
 
+    fn create_bufwriter(&self) -> Result<io::BufWriter<fs::File>, Error> {
+        let re = match regex::Regex::new(r"^(?P<REPORTPATH>\w:\\.*\\).*\\(?P<REPORTNAME>.*)\.txt$") {
+            Ok(x) => x,
+            Err(err) => panic!("{}", err),
+        };
+        if let Some(caps) = re.captures(self.path_filename.as_str()) {
+            let report_filename = format!("{}{}.csv", caps.name("REPORTPATH").map_or("".to_string(), |m| String::from(m.as_str())), 
+                                                                caps.name("REPORTNAME").map_or("".to_string(), |m| String::from(m.as_str())));
+            let file = match fs::OpenOptions::new().read(true).write(true).append(true).create(true).open(path::Path::new(report_filename.as_str())) {
+                Ok(x) => x,
+                Err(err) => panic!("{}", err),
+            };
+            return Ok(io::BufWriter::new(file))
+        }
+        else {
+            return Err(Error::new(io::ErrorKind::InvalidData, "Error occured while creating the File buffer to write report"))
+        }
+        // return Err(Error::new(io::ErrorKind::InvalidData, "Error occured while creating the File buffer to write report"))
+    }
+
     fn create_key_value_table_ref(&self, table_to_create: String, entries: Vec<(String, String)>, connx: &Connection) {
         let query_table = format!("CREATE TABLE '{}' (key TEXT, value TEXT)", table_to_create);
         let _ = connx.execute(query_table);
@@ -59,6 +79,10 @@ impl AndroidParser {
     fn compare_key_value(&self, connx: &Connection, entries: Vec<(String, String)>, table_to_select: String) {
         let query = format!("SELECT * FROM '{}' WHERE key=:key", table_to_select);
         let mut stmt = connx.prepare(query.as_str()).unwrap();
+        let mut buf_writer = match self.create_bufwriter() {
+            Ok(x) => x,
+            Err(err) => panic!("{}", err),
+        };
         entries.into_iter().for_each(|each_entry| {
             let _ = stmt.bind((":key", each_entry.0.as_str()));
             let mut flag: bool = false;
@@ -70,7 +94,7 @@ impl AndroidParser {
             }
             let _ = stmt.reset();
             if !flag {
-                println!("[REPORTED] {} -> couple parameter {}, value {} not as Reference.", self.path_filename.as_str(), each_entry.0, each_entry.1);
+                let _ = buf_writer.write_all(format!("{};{};{}\n", self.path_filename.as_str(), each_entry.0, each_entry.1).as_bytes());
             }
         });
     }
@@ -94,6 +118,10 @@ impl AndroidParser {
     fn compare_key_xvalues(&self, connx: &Connection, entries: Vec<Vec<(String, Vec<String>)>>, table_to_select: String) {
         let query = format!("SELECT * FROM {} WHERE key=:key", table_to_select);
         let mut stmt = connx.prepare(query).unwrap();
+        let mut buf_writer = match self.create_bufwriter() {
+            Ok(x) => x,
+            Err(err) => panic!("{}", err),
+        };
         entries.into_iter().for_each(|high_block| {
             high_block.into_iter().for_each(|mid_block| {
                 let mut ref_values: Vec<String> = vec![];
@@ -105,7 +133,7 @@ impl AndroidParser {
                 let _ = stmt.reset();
                 mid_block.1.into_iter().for_each(|each_value| {
                     if !ref_values.contains(&each_value) {
-                        println!("[REPORTED] {} -> couple parameter {}, value {} not as Reference.", self.path_filename.as_str(), mid_block.0, each_value);
+                        let _ = buf_writer.write_all(format!("{};{};{}\n", self.path_filename.as_str(), mid_block.0, each_value).as_bytes());
                     }
                 });
             });
@@ -132,6 +160,10 @@ impl AndroidParser {
     fn compare_key_3values(&self, table_to_select: String, entries: Vec<(String, String, String, String)>, connx: &Connection, header: String) {
         let query = format!("SELECT * FROM '{}' WHERE {}=:key", table_to_select, header);
         let mut stmt = connx.prepare(query).unwrap();
+        let mut buf_writer = match self.create_bufwriter() {
+            Ok(x) => x,
+            Err(err) => panic!("{}", err),
+        };
         entries.into_iter().for_each(|each_entry| {
             let mut flag: bool = false;
             let _ = stmt.bind((":key", each_entry.0.as_str()));
@@ -143,7 +175,7 @@ impl AndroidParser {
                 }
             }
             if !flag {
-                println!("[REPORTED] {} -> couple parameter {}, values ({}, {}, {}) not as Reference.", self.path_filename.as_str(), each_entry.0, each_entry.1, each_entry.2, each_entry.3);
+                let _ = buf_writer.write_all(format!("{};{};{};{};{}\n", self.path_filename.as_str(), each_entry.0, each_entry.1, each_entry.2, each_entry.3).as_bytes());
             }
             let _ = stmt.reset();
         });
@@ -171,6 +203,10 @@ impl AndroidParser {
     fn compare_5values_block(&self, connx: &Connection, entries: Vec<[String; 5]>, table_to_select: String, header: String) {
         let query = format!("SELECT * FROM '{}' WHERE {}=:key", table_to_select, header);
         let mut stmt = connx.prepare(query).unwrap();
+        let mut buf_writer = match self.create_bufwriter() {
+            Ok(x) => x,
+            Err(err) => panic!("{}", err),
+        };
         entries.into_iter().for_each(|blocks| {
             // Array : permission, package, label, description, protectionLevel
             let mut flag: bool = false;
@@ -182,7 +218,7 @@ impl AndroidParser {
                 }
             }
             if !flag {
-                println!("[REPORTED] {} -> couple parameter {}, values ({}, {}, {}, {}) not as Reference.", self.path_filename.as_str(), blocks[0], blocks[1], blocks[2], blocks[3], blocks[4]);
+                let _ = buf_writer.write_all(format!("{};{};{};{};{};{}\n) not as Reference.", self.path_filename.as_str(), blocks[0], blocks[1], blocks[2], blocks[3], blocks[4]).as_bytes());
             }
             let _ = stmt.reset();
         });
