@@ -1,7 +1,6 @@
 use std::{env, path, sync::Arc};
 use rfd;
 use sqlite::{self, ConnectionWithFullMutex};
-use rayon::prelude::*;
 
 use android_sanity_checker::androidparser;
 
