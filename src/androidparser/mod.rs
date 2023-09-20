@@ -1,6 +1,6 @@
-use std::{io::{self, BufRead, Error, Write}, fs, path};
+use std::{io::{self, BufRead, Error, Write}, fs, path, sync:: Arc};
 use regex::Regex;
-use sqlite::{self, Connection, State};
+use sqlite::{self, ConnectionWithFullMutex, State};
 
 pub struct AndroidParser {
     path_filename: String,
@@ -19,14 +19,14 @@ impl AndroidParser {
         };
     }
 
-    pub fn go_parse(&self, connx: &sqlite::Connection){
+    pub fn go_parse(&self, connx: Arc<ConnectionWithFullMutex>){
         let buf_reader = self.create_bufreader();
         if let Ok(x) = buf_reader {
             self.android_file_selector(x, connx);
         }
     }
 
-    pub fn go_ref(&self, connx: &Connection) {
+    pub fn go_ref(&self, connx: Arc<ConnectionWithFullMutex>) {
         let buf_reader = self.create_bufreader();
         if let Ok(x) = buf_reader {
             self.android_file_reference(x, connx);
@@ -61,7 +61,7 @@ impl AndroidParser {
         // return Err(Error::new(io::ErrorKind::InvalidData, "Error occured while creating the File buffer to write report"))
     }
 
-    fn create_key_value_table_ref(&self, table_to_create: String, entries: Vec<(String, String)>, connx: &Connection) {
+    fn create_key_value_table_ref(&self, table_to_create: String, entries: Vec<(String, String)>, connx: Arc<ConnectionWithFullMutex>) {
         let query_table = format!("CREATE TABLE '{}' (key TEXT, value TEXT)", table_to_create);
         let _ = connx.execute(query_table);
         let query_insert = format!("INSERT INTO '{}' (key, value) VALUES (:key, :value)", table_to_create);
@@ -76,7 +76,7 @@ impl AndroidParser {
         });
     }
 
-    fn compare_key_value(&self, connx: &Connection, entries: Vec<(String, String)>, table_to_select: String) {
+    fn compare_key_value(&self, connx: Arc<ConnectionWithFullMutex>, entries: Vec<(String, String)>, table_to_select: String) {
         let query = format!("SELECT * FROM '{}' WHERE key=:key", table_to_select);
         let mut stmt = connx.prepare(query.as_str()).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
@@ -99,7 +99,7 @@ impl AndroidParser {
         });
     }
     
-    fn create_key_xvalues_table_ref(&self, table_to_create: String, entries: Vec<Vec<(String, Vec<String>)>>, connx: &Connection) {
+    fn create_key_xvalues_table_ref(&self, table_to_create: String, entries: Vec<Vec<(String, Vec<String>)>>, connx: Arc<ConnectionWithFullMutex>) {
         let query_table = format!("CREATE TABLE '{}' (key TEXT, value TEXT)", table_to_create);
         let _ = connx.execute(query_table);
         let query_insert = format!("INSERT INTO '{}' (key, value) VALUES (:key, :value)", table_to_create);
@@ -115,7 +115,7 @@ impl AndroidParser {
         });
     }
 
-    fn compare_key_xvalues(&self, connx: &Connection, entries: Vec<Vec<(String, Vec<String>)>>, table_to_select: String) {
+    fn compare_key_xvalues(&self, connx: Arc<ConnectionWithFullMutex>, entries: Vec<Vec<(String, Vec<String>)>>, table_to_select: String) {
         let query = format!("SELECT * FROM {} WHERE key=:key", table_to_select);
         let mut stmt = connx.prepare(query).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
@@ -140,7 +140,7 @@ impl AndroidParser {
         });
     }
 
-    fn create_key_3values_table_ref(&self, table_to_create: String, entries: Vec<(String, String, String, String)>, connx: &Connection, headers: (String, String, String, String)) {
+    fn create_key_3values_table_ref(&self, table_to_create: String, entries: Vec<(String, String, String, String)>, connx: Arc<ConnectionWithFullMutex>, headers: (String, String, String, String)) {
         let query_table = format!("CREATE TABLE '{table_to_create}' ({} TEXT, {} TEXT, {} TEXT, {} TEXT)", headers.0, headers.1, headers.2, headers.3);
         let _ = connx.execute(query_table);
         let query_insert = format!("INSERT INTO '{table_to_create}' ({}, {}, {}, {}) VALUES (:key, :val1, :val2, :val3)", headers.0, headers.1, headers.2, headers.3);
@@ -157,7 +157,7 @@ impl AndroidParser {
         });
     }
 
-    fn compare_key_3values(&self, table_to_select: String, entries: Vec<(String, String, String, String)>, connx: &Connection, header: String) {
+    fn compare_key_3values(&self, table_to_select: String, entries: Vec<(String, String, String, String)>, connx: Arc<ConnectionWithFullMutex>, header: String) {
         let query = format!("SELECT * FROM '{}' WHERE {}=:key", table_to_select, header);
         let mut stmt = connx.prepare(query).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
@@ -181,7 +181,7 @@ impl AndroidParser {
         });
     }
 
-    fn create_5values_block_table_ref(&self, table_to_create: String, entries: Vec<[String; 5]>, connx: &Connection, headers: (String, String, String, String, String)) {
+    fn create_5values_block_table_ref(&self, table_to_create: String, entries: Vec<[String; 5]>, connx: Arc<ConnectionWithFullMutex>, headers: (String, String, String, String, String)) {
         let query_table = format!("CREATE TABLE '{table_to_create}' ({} TEXT, {} TEXT, {} TEXT, {} TEXT, {} TEXT)", headers.0, headers.1, headers.2, headers.3, headers.4);
         let _ = connx.execute(query_table);
         let query_insert = format!("INSERT INTO '{table_to_create}' ({0}, {1}, {2}, {3}, {4}) VALUES (:{0}, :{1}, :{2}, :{3}, :{4})", headers.0, headers.1, headers.2, headers.3, headers.4);
@@ -200,7 +200,7 @@ impl AndroidParser {
         });
     }
 
-    fn compare_5values_block(&self, connx: &Connection, entries: Vec<[String; 5]>, table_to_select: String, header: String) {
+    fn compare_5values_block(&self, connx: Arc<ConnectionWithFullMutex>, entries: Vec<[String; 5]>, table_to_select: String, header: String) {
         let query = format!("SELECT * FROM '{}' WHERE {}=:key", table_to_select, header);
         let mut stmt = connx.prepare(query).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
@@ -416,7 +416,7 @@ impl AndroidParser {
         results
     }
 
-    fn android_file_selector(&self, buf_reader: io::BufReader<fs::File>, connx: &sqlite::Connection) {
+    fn android_file_selector(&self, buf_reader: io::BufReader<fs::File>, connx: Arc<ConnectionWithFullMutex>) {
         let path_filename = path::Path::new(&self.path_filename);
         match path_filename.file_name() {
             Some(x) => {
@@ -455,7 +455,7 @@ impl AndroidParser {
         };
     }
 
-    fn android_file_reference(&self, buf_reader: io::BufReader<fs::File>, connx: &Connection) {
+    fn android_file_reference(&self, buf_reader: io::BufReader<fs::File>, connx: Arc<ConnectionWithFullMutex>) {
         let path_filename = path::Path::new(&self.path_filename);
         match path_filename.file_name() {
             Some(x) => { 

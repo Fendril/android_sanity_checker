@@ -1,71 +1,101 @@
-use std::{env, path};
+use std::{env, path, sync::Arc};
 use rfd;
-use sqlite;
+use sqlite::{self, ConnectionWithFullMutex};
+use rayon::prelude::*;
 
 use android_sanity_checker::androidparser;
 
-fn parse_path(path: &path::Path, connx: &sqlite::Connection) {
+fn parse_path(path: String, connx: Arc<ConnectionWithFullMutex>) {
+    let path = path::Path::new(path.as_str());
     let validator_flag = match path.try_exists() {
         Ok(x)=> x,
         Err(err) => panic!("[Error] {}", err.to_string()),
     };
-    if validator_flag & path.is_dir() == true {
+    if validator_flag && path.is_dir() == true {
         if let Ok(read_dir) = path.read_dir() {
-            for each_dir in read_dir {
-                if let Ok(each_entry) = each_dir {
-                    parse_path(each_entry.path().as_path(), connx);
+            rayon::scope(|s| {
+                for each_dir in read_dir {
+                    if let Ok(each_entry) = each_dir {
+                        if each_entry.file_type().unwrap().is_dir() {
+                            parse_path(String::from(each_entry.path().to_str().unwrap()), Arc::clone(&connx)); 
+                        }
+                        else if each_entry.file_type().unwrap().is_file() && each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "txt") {
+                            let local_connx = connx.clone();
+                            s.spawn(move |_| {
+                                // println!("[DEBUT] {}", each_entry.file_name().to_str().unwrap());
+                                let android_file_parser = androidparser::AndroidParser::new(each_entry.path().as_path());
+                                match android_file_parser {
+                                    Ok(x) => {
+                                        x.go_parse(local_connx);
+                                    },
+                                    Err(err) => eprintln!("{err}"),
+                                };
+                                // println!("[FIN] {}", each_entry.file_name().to_str().unwrap());
+                            });
+                        }
+                    }
                 }
-            }
+            });
         }
     }
-    else if validator_flag & path.is_file() == true {
+    else if path.extension().is_some_and(|x| x.to_str().unwrap() == "txt") && validator_flag && path.is_file() {
         let android_file_parser = androidparser::AndroidParser::new(path);
         match android_file_parser {
-            Ok(x) => x.go_parse(connx),
+            Ok(x) => {x.go_parse(Arc::clone(&connx));},
             Err(err) => eprintln!("{err}"),
         };
     }
 }
 
-fn parse_ref(path: &path::Path, connx: &sqlite::Connection) {
+fn parse_ref(path: String, connx: Arc<ConnectionWithFullMutex>) {
+    let path = path::Path::new(path.as_str());
     let validator_flag = match path.try_exists() {
         Ok(x)=> x,
         Err(err) => panic!("[Error] {}", err.to_string()),
     };
-    if validator_flag & path.is_dir() == true {
+    // println!("DEBUG {}", path.display());
+    // println!("{} | {} | {}", path.extension().is_some_and(|x| x.to_str().unwrap() == "txt"), validator_flag, path.is_file());
+    if validator_flag && path.is_dir() == true {
         if let Ok(read_dir) = path.read_dir() {
-            for each_dir in read_dir {
-                if let Ok(each_entry) = each_dir {
-                    parse_ref(each_entry.path().as_path(), connx);
+            rayon::scope(|s| {
+                for each_dir in read_dir {
+                    if let Ok(each_entry) = each_dir {
+                        if each_entry.file_type().unwrap().is_dir() {
+                            parse_ref(String::from(each_entry.path().to_str().unwrap()), Arc::clone(&connx)); 
+                        }
+                        else if each_entry.file_type().unwrap().is_file() && each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "txt") {
+                            let local_connx = connx.clone();
+                            s.spawn(move |_| {
+                                // println!("[DEBUT] {}", each_entry.file_name().to_str().unwrap());
+                                let android_file_parser = androidparser::AndroidParser::new(each_entry.path().as_path());
+                                match android_file_parser {
+                                    Ok(x) => {
+                                        x.go_ref(local_connx);
+                                    },
+                                    Err(err) => eprintln!("{err}"),
+                                };
+                                // println!("[FIN] {}", each_entry.file_name().to_str().unwrap());
+                            });
+                        }
+                    }
                 }
-            }
+            });
         }
     }
-    else if validator_flag & path.is_file() == true {
+    else if path.extension().is_some_and(|x| x.to_str().unwrap() == "txt") && validator_flag && path.is_file() {
         let android_file_parser = androidparser::AndroidParser::new(path);
         match android_file_parser {
-            Ok(x) => x.go_ref(connx),
+            Ok(x) => {
+                rayon::scope(|s| {
+                    s.spawn(|_| {
+                        x.go_ref(Arc::clone(&connx));
+                    });
+                });
+            },
             Err(err) => eprintln!("{err}"),
         };
     }
 }
-
-    // if let Ok(read_dir) = path_to_dir.read_dir() {
-    //     for each_dir in read_dir {
-    //         if let Ok(each_dir) = each_dir {
-    //             let this_dir_path = each_dir.path();
-    //             let this_dir = path::Path::new(this_dir_path.to_str().unwrap());
-    //             if each_dir.file_type().unwrap().is_dir() {
-    //                 // TODO: Gestion de Threads
-    //                 parse_dir(&this_dir);
-    //             }
-    //             else if each_dir.file_type().unwrap().is_file() {
-    //                 let buf_reader = get_reader_ro(this_dir);
-    //                 android_file_selector(this_dir, buf_reader);
-    //             }
-    //         }
-    //     }
-    // }
 
 fn main() {
 
@@ -73,12 +103,14 @@ fn main() {
     env::set_var("RUST_BACKTRACE", "1");
     // !! FOR DEBUG !!
 
-    let connection = sqlite::open(":memory:");
-    // let connection = sqlite::open(r"D:\Experimentations\Android\test.sqlite");
-    let connection = match connection {
+    let connection = sqlite::Connection::open_with_full_mutex(":memory:");
+    // let connection = sqlite::Connection::open_with_full_mutex(r"D:\Experimentations\Android\test.sqlite");
+    let connection: ConnectionWithFullMutex = match connection {
         Ok(x) => x,
         Err(err) => panic!("{err}"),
     };
+
+    let connection = Arc::new(connection);
 
     let user_entries: Vec<String> = env::args().skip(1).map(|x| String::from(x)).collect();
     for argument in user_entries {
@@ -89,8 +121,7 @@ fn main() {
                 Err(_) => panic!("Number of threads must be a number --> --threads=4"),
             };
             println!("User -> {} | Available -> {}", user_entry, available_threads);
-        } else {
-            parse_path(path::Path::new(argument.as_str()), &connection);
+            // POOL.set_num_threads(user_entry);
         }
     }
     let tip_message: rfd::AsyncMessageDialog = rfd::AsyncMessageDialog::new()
@@ -103,7 +134,7 @@ fn main() {
             .pick_folder() {
         Some(d) => {
             println!("Creating reference into SQLite DB. Please wait...");
-            parse_ref(d.as_path(), &connection)
+            parse_ref(String::from(d.to_str().unwrap()), Arc::clone(&connection))
         },
         None => panic!("No directory selected."),
     };
@@ -115,7 +146,7 @@ fn main() {
     let _dir = match rfd::FileDialog::new()
             .set_directory("/")
             .pick_folder() {
-        Some(d) => parse_path(d.as_path(), &connection),
+        Some(d) => parse_path(String::from(d.to_str().unwrap()), Arc::clone(&connection)),
         None => panic!("No directory selected."),
     };
     // MainWindow::new().unwrap().run().unwrap();
