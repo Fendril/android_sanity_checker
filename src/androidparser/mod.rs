@@ -1,6 +1,7 @@
 use std::{io::{self, BufRead, Error, Write}, fs, path, sync:: Arc};
 use regex::Regex;
 use sqlite::{self, ConnectionWithFullMutex, State};
+use yara::Rules;
 
 pub struct AndroidParser {
     path_filename: String,
@@ -19,10 +20,10 @@ impl AndroidParser {
         };
     }
 
-    pub fn go_parse(&self, connx: Arc<ConnectionWithFullMutex>){
+    pub fn go_parse(&self, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Rules>>){
         let buf_reader = self.create_bufreader();
         if let Ok(x) = buf_reader {
-            self.android_file_selector(x, connx);
+            self.android_file_selector(x, connx, yara_checker);
         }
     }
 
@@ -61,7 +62,7 @@ impl AndroidParser {
         // return Err(Error::new(io::ErrorKind::InvalidData, "Error occured while creating the File buffer to write report"))
     }
 
-    fn create_key_value_table_ref(&self, table_to_create: String, entries: Vec<(String, String)>, connx: Arc<ConnectionWithFullMutex>) {
+    fn create_key_value_table_ref(&self, connx: Arc<ConnectionWithFullMutex>, table_to_create: String, entries: Vec<(String, String)>, ) {
         let query_table = format!("CREATE TABLE '{}' (key TEXT, value TEXT)", table_to_create);
         let _ = connx.execute(query_table);
         let query_insert = format!("INSERT INTO '{}' (key, value) VALUES (:key, :value)", table_to_create);
@@ -76,13 +77,14 @@ impl AndroidParser {
         });
     }
 
-    fn compare_key_value(&self, connx: Arc<ConnectionWithFullMutex>, entries: Vec<(String, String)>, table_to_select: String) {
+    fn compare_key_value(&self, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Rules>>, entries: Vec<(String, String)>, table_to_select: String) {
         let query = format!("SELECT * FROM '{}' WHERE key=:key", table_to_select);
         let mut stmt = connx.prepare(query.as_str()).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
             Ok(x) => x,
             Err(err) => panic!("{}", err),
         };
+        let _ = buf_writer.write_all("file_name;setting_name;setting_config;yara_match;yara_rulename\n".as_bytes());
         entries.into_iter().for_each(|each_entry| {
             let _ = stmt.bind((":key", each_entry.0.as_str()));
             let mut flag: bool = false;
@@ -94,12 +96,29 @@ impl AndroidParser {
             }
             let _ = stmt.reset();
             if !flag {
-                let _ = buf_writer.write_all(format!("{};{};{}\n", self.path_filename.as_str(), each_entry.0, each_entry.1).as_bytes());
+                let mut matched_rules_names = String::new();
+                flag = false;
+                if let Some(yara_checker) = &yara_checker {
+                    if let Ok(yara_matches) = yara_checker.scan_mem(format!("{} {}", each_entry.0, each_entry.1).as_bytes(), 5){
+                        if !yara_matches.is_empty() {
+                            if !flag { flag = true; }
+                            yara_matches.into_iter().for_each(|x| {
+                                matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
+                            });
+                        }
+                    };
+                };
+                if flag {
+                    let _ = buf_writer.write_all(format!("{};{};{};true;{}\n", self.path_filename.as_str(), each_entry.0, each_entry.1, matched_rules_names.as_str()).as_bytes());
+                }
+                else {
+                    let _ = buf_writer.write_all(format!("{};{};{};false;\n", self.path_filename.as_str(), each_entry.0, each_entry.1).as_bytes());
+                }
             }
         });
     }
     
-    fn create_key_xvalues_table_ref(&self, table_to_create: String, entries: Vec<Vec<(String, Vec<String>)>>, connx: Arc<ConnectionWithFullMutex>) {
+    fn create_key_xvalues_table_ref(&self,connx: Arc<ConnectionWithFullMutex>, table_to_create: String, entries: Vec<Vec<(String, Vec<String>)>>) {
         let query_table = format!("CREATE TABLE '{}' (key TEXT, value TEXT)", table_to_create);
         let _ = connx.execute(query_table);
         let query_insert = format!("INSERT INTO '{}' (key, value) VALUES (:key, :value)", table_to_create);
@@ -115,13 +134,14 @@ impl AndroidParser {
         });
     }
 
-    fn compare_key_xvalues(&self, connx: Arc<ConnectionWithFullMutex>, entries: Vec<Vec<(String, Vec<String>)>>, table_to_select: String) {
+    fn compare_key_xvalues(&self, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Rules>>, entries: Vec<Vec<(String, Vec<String>)>>, table_to_select: String) {
         let query = format!("SELECT * FROM {} WHERE key=:key", table_to_select);
         let mut stmt = connx.prepare(query).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
             Ok(x) => x,
             Err(err) => panic!("{}", err),
         };
+        let _ = buf_writer.write_all("file_name;setting_name;setting_config;yara_match;yara_rulename\n".as_bytes());
         entries.into_iter().for_each(|high_block| {
             high_block.into_iter().for_each(|mid_block| {
                 let mut ref_values: Vec<String> = vec![];
@@ -133,14 +153,31 @@ impl AndroidParser {
                 let _ = stmt.reset();
                 mid_block.1.into_iter().for_each(|each_value| {
                     if !ref_values.contains(&each_value) {
-                        let _ = buf_writer.write_all(format!("{};{};{}\n", self.path_filename.as_str(), mid_block.0, each_value).as_bytes());
+                        let mut matched_rules_names = String::new();
+                        let mut flag: bool = false;
+                        if let Some(yara_checker) = &yara_checker {
+                            if let Ok(yara_matches) = yara_checker.scan_mem(format!("{} {}", mid_block.0, each_value).as_bytes(), 5){
+                                if !yara_matches.is_empty() {
+                                    if !flag { flag = true; }
+                                    yara_matches.into_iter().for_each(|x| {
+                                        matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
+                                    });
+                                }
+                            };
+                        };
+                        if flag {
+                            let _ = buf_writer.write_all(format!("{};{};{};true;{}\n", self.path_filename.as_str(), mid_block.0, each_value, matched_rules_names.as_str()).as_bytes());
+                        }
+                        else {
+                            let _ = buf_writer.write_all(format!("{};{};{};false;\n", self.path_filename.as_str(), mid_block.0, each_value).as_bytes());
+                        }
                     }
                 });
             });
         });
     }
 
-    fn create_key_3values_table_ref(&self, table_to_create: String, entries: Vec<(String, String, String, String)>, connx: Arc<ConnectionWithFullMutex>, headers: (String, String, String, String)) {
+    fn create_key_3values_table_ref(&self, connx: Arc<ConnectionWithFullMutex>, table_to_create: String, entries: Vec<(String, String, String, String)>, headers: (String, String, String, String)) {
         let query_table = format!("CREATE TABLE '{table_to_create}' ({} TEXT, {} TEXT, {} TEXT, {} TEXT)", headers.0, headers.1, headers.2, headers.3);
         let _ = connx.execute(query_table);
         let query_insert = format!("INSERT INTO '{table_to_create}' ({}, {}, {}, {}) VALUES (:key, :val1, :val2, :val3)", headers.0, headers.1, headers.2, headers.3);
@@ -157,13 +194,18 @@ impl AndroidParser {
         });
     }
 
-    fn compare_key_3values(&self, table_to_select: String, entries: Vec<(String, String, String, String)>, connx: Arc<ConnectionWithFullMutex>, header: String) {
+    fn compare_key_3values(&self, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Rules>>, table_to_select: String, entries: Vec<(String, String, String, String)>, header: String) {
         let query = format!("SELECT * FROM '{}' WHERE {}=:key", table_to_select, header);
         let mut stmt = connx.prepare(query).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
             Ok(x) => x,
             Err(err) => panic!("{}", err),
         };
+        let _ = buf_writer.write_all(format!("file_name;{};{};{};{};yara_match;yara_rulename\n"
+                , stmt.column_name(0).unwrap_or("setting_name")
+                , stmt.column_name(1).unwrap_or("setting_config1")
+                , stmt.column_name(2).unwrap_or("setting_config2")
+                , stmt.column_name(3).unwrap_or("setting_config3")).as_bytes());
         entries.into_iter().for_each(|each_entry| {
             let mut flag: bool = false;
             let _ = stmt.bind((":key", each_entry.0.as_str()));
@@ -175,13 +217,30 @@ impl AndroidParser {
                 }
             }
             if !flag {
-                let _ = buf_writer.write_all(format!("{};{};{};{};{}\n", self.path_filename.as_str(), each_entry.0, each_entry.1, each_entry.2, each_entry.3).as_bytes());
+                let mut matched_rules_names = String::new();
+                flag = false;
+                if let Some(yara_checker) = &yara_checker {
+                    if let Ok(yara_matches) = yara_checker.scan_mem(format!("{} {} {} {}", each_entry.0, each_entry.1, each_entry.2, each_entry.3).as_bytes(), 5){
+                        if !yara_matches.is_empty() {
+                            if !flag { flag = true; }
+                            yara_matches.into_iter().for_each(|x| {
+                                matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
+                            });
+                        }
+                    };
+                };
+                if flag {
+                    let _ = buf_writer.write_all(format!("{};{};{};{};{};true;{}\n", self.path_filename.as_str(), each_entry.0, each_entry.1, each_entry.2, each_entry.3, matched_rules_names.as_str()).as_bytes());
+                }
+                else {
+                    let _ = buf_writer.write_all(format!("{};{};{};{};{};;\n", self.path_filename.as_str(), each_entry.0, each_entry.1, each_entry.2, each_entry.3).as_bytes());
+                }
             }
             let _ = stmt.reset();
         });
     }
 
-    fn create_5values_block_table_ref(&self, table_to_create: String, entries: Vec<[String; 5]>, connx: Arc<ConnectionWithFullMutex>, headers: (String, String, String, String, String)) {
+    fn create_5values_block_table_ref(&self, connx: Arc<ConnectionWithFullMutex>, table_to_create: String, entries: Vec<[String; 5]>, headers: (String, String, String, String, String)) {
         let query_table = format!("CREATE TABLE '{table_to_create}' ({} TEXT, {} TEXT, {} TEXT, {} TEXT, {} TEXT)", headers.0, headers.1, headers.2, headers.3, headers.4);
         let _ = connx.execute(query_table);
         let query_insert = format!("INSERT INTO '{table_to_create}' ({0}, {1}, {2}, {3}, {4}) VALUES (:{0}, :{1}, :{2}, :{3}, :{4})", headers.0, headers.1, headers.2, headers.3, headers.4);
@@ -200,13 +259,19 @@ impl AndroidParser {
         });
     }
 
-    fn compare_5values_block(&self, connx: Arc<ConnectionWithFullMutex>, entries: Vec<[String; 5]>, table_to_select: String, header: String) {
+    fn compare_5values_block(&self, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Rules>>, entries: Vec<[String; 5]>, table_to_select: String, header: String) {
         let query = format!("SELECT * FROM '{}' WHERE {}=:key", table_to_select, header);
         let mut stmt = connx.prepare(query).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
             Ok(x) => x,
             Err(err) => panic!("{}", err),
         };
+        let _ = buf_writer.write_all(format!("file_name;{};{};{};{};{};yara_match;yara_rulename\n"
+                , stmt.column_name(0).unwrap_or("setting_config1")
+                , stmt.column_name(1).unwrap_or("setting_config2")
+                , stmt.column_name(2).unwrap_or("setting_config3")
+                , stmt.column_name(3).unwrap_or("setting_config4")
+                , stmt.column_name(4).unwrap_or("setting_config5")).as_bytes());
         entries.into_iter().for_each(|blocks| {
             // Array : permission, package, label, description, protectionLevel
             let mut flag: bool = false;
@@ -218,7 +283,24 @@ impl AndroidParser {
                 }
             }
             if !flag {
-                let _ = buf_writer.write_all(format!("{};{};{};{};{};{}\n) not as Reference.", self.path_filename.as_str(), blocks[0], blocks[1], blocks[2], blocks[3], blocks[4]).as_bytes());
+                let mut matched_rules_names = String::new();
+                flag = false;
+                if let Some(yara_checker) = &yara_checker {
+                    if let Ok(yara_matches) = yara_checker.scan_mem(format!("{} {} {} {} {}", blocks[0], blocks[1], blocks[2], blocks[3], blocks[4]).as_bytes(), 5){
+                        if !yara_matches.is_empty() {
+                            if !flag { flag = true; }
+                            yara_matches.into_iter().for_each(|x| {
+                                matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
+                            });
+                        }
+                    };
+                };
+                if flag {
+                    let _ = buf_writer.write_all(format!("{};{};{};{};{};{};true;{}\n", self.path_filename.as_str(), blocks[0], blocks[1], blocks[2], blocks[3], blocks[4], matched_rules_names.as_str()).as_bytes());
+                }
+                else {
+                    let _ = buf_writer.write_all(format!("{};{};{};{};{};{};;\n", self.path_filename.as_str(), blocks[0], blocks[1], blocks[2], blocks[3], blocks[4]).as_bytes());
+                }
             }
             let _ = stmt.reset();
         });
@@ -416,38 +498,38 @@ impl AndroidParser {
         results
     }
 
-    fn android_file_selector(&self, buf_reader: io::BufReader<fs::File>, connx: Arc<ConnectionWithFullMutex>) {
+    fn android_file_selector(&self, buf_reader: io::BufReader<fs::File>, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Rules>>) {
         let path_filename = path::Path::new(&self.path_filename);
         match path_filename.file_name() {
             Some(x) => {
                 let mut splited_str = x.to_str().unwrap().split(".");
                 let parted = splited_str.next().unwrap();
-                if parted == "getprop" { 
-                    self.compare_key_value(connx, self.parse_getprop(buf_reader), parted.to_string());
+                if parted == "getprop"  {
+                    self.compare_key_value(connx, yara_checker, self.parse_getprop(buf_reader), parted.to_string());
                 }
                 else if parted.starts_with("settings_") || parted.starts_with("printenv.txt") {
-                    self.compare_key_value(connx, self.parse_settings(buf_reader), parted.to_string());
+                    self.compare_key_value(connx, yara_checker, self.parse_settings(buf_reader), parted.to_string());
                 }
                 else if parted == "df_ah" {
-                    self.compare_key_value(connx, self.parse_df_ah(buf_reader), parted.to_string());
+                    self.compare_key_value(connx, yara_checker, self.parse_df_ah(buf_reader), parted.to_string());
                 }
                 else if parted == "services" {
-                    self.compare_key_value(connx, self.parse_services(buf_reader), parted.to_string());
+                    self.compare_key_value(connx, yara_checker, self.parse_services(buf_reader), parted.to_string());
                 }
                 else if parted == "id" {
-                    self.compare_key_xvalues(connx, self.parse_id(buf_reader), parted.to_string());
+                    self.compare_key_xvalues(connx, yara_checker, self.parse_id(buf_reader), parted.to_string());
                 }
                 else if parted == "mount" {
-                    self.compare_key_3values(parted.to_string(), self.parse_mount(buf_reader), connx, "name".to_string());
+                    self.compare_key_3values(connx, yara_checker, parted.to_string(), self.parse_mount(buf_reader), "name".to_string());
                 }
                 else if parted == "ps" {
-                    self.compare_key_3values(parted.to_string(), self.parse_ps(buf_reader), connx, "uid".to_string());
+                    self.compare_key_3values(connx, yara_checker, parted.to_string(), self.parse_ps(buf_reader), "uid".to_string());
                 }
                 else if parted == "pm_list_permissions-f" {
-                    self.compare_5values_block(connx, self.parse_permissions_list(buf_reader), parted.to_string(), "permission".to_string());
+                    self.compare_5values_block(connx, yara_checker, self.parse_permissions_list(buf_reader), parted.to_string(), "permission".to_string());
                 }
                 else if parted.starts_with("pm_list_") & !parted.ends_with("users") {   //TODO pm_list_permissions-f AVANT Celui lui.
-                    self.compare_key_value(connx, self.parse_list(buf_reader), parted.to_string());
+                    self.compare_key_value(connx, yara_checker, self.parse_list(buf_reader), parted.to_string());
                 }
 
             },
@@ -462,62 +544,63 @@ impl AndroidParser {
                 let mut splited_str = x.to_str().unwrap().split(".");
                 let parted = splited_str.next().unwrap();
                 if x == "getprop.txt" {
-                    self.create_key_value_table_ref(parted.to_string()
+                    self.create_key_value_table_ref(connx
+                            , parted.to_string()
                             , self.parse_getprop(buf_reader)
-                            , connx
                     );
                 }
                 else if parted.starts_with("settings_") || parted == "printenv" {
-                    self.create_key_value_table_ref(parted.to_string()
+                    self.create_key_value_table_ref(connx
+                            ,parted.to_string()
                             , self.parse_settings(buf_reader)
-                            , connx
                     );
                 }
                 else if parted.starts_with("df_ah") {
-                    self.create_key_value_table_ref(parted.to_string()
+                    self.create_key_value_table_ref(connx
+                            ,parted.to_string()
                             , self.parse_df_ah(buf_reader)
-                            , connx
                     );
                 }
                 else if parted == "id" {
-                    self.create_key_xvalues_table_ref(parted.to_string()
+                    self.create_key_xvalues_table_ref(connx
+                            , parted.to_string()
                             , self.parse_id(buf_reader)
-                            , connx
                     );
                 }
                 else if parted == "mount" {
                     let headers: (String, String, String, String) = ("name".to_string(), "mountpoint".to_string(), "type".to_string(), "options".to_string());
-                    self.create_key_3values_table_ref(parted.to_string()
+                    self.create_key_3values_table_ref(connx
+                            ,parted.to_string()
                             , self.parse_mount(buf_reader)
-                            , connx
                             , headers
                     );
                 }
                 else if parted == "ps" {
                     let headers: (String, String, String, String) = ("uid".to_string(), "pid".to_string(), "ppid".to_string(), "cmd".to_string());
-                    self.create_key_3values_table_ref(parted.to_string()
+                    self.create_key_3values_table_ref(connx
+                            , parted.to_string()
                             , self.parse_ps(buf_reader)
-                            , connx
-                            , headers);
+                            , headers
+                    );
                 }
                 else if parted == "services" {
-                    self.create_key_value_table_ref(parted.to_string()
+                    self.create_key_value_table_ref(connx
+                            ,parted.to_string()
                             , self.parse_services(buf_reader)
-                            , connx
                     );
                 }
                 else if parted == "pm_list_permissions-f" {
                     let headers: (String, String, String, String, String) = ("permission".to_string(), "package".to_string(), "label".to_string(), "description".to_string(), "protectionlevel".to_string());
-                    self.create_5values_block_table_ref(parted.to_string()
+                    self.create_5values_block_table_ref(connx
+                            ,parted.to_string()
                             , self.parse_permissions_list(buf_reader)
-                            , connx
                             , headers
                         );
                 }
                 else if parted.starts_with("pm_list_") & !parted.ends_with("users") {
-                    self.create_key_value_table_ref(parted.to_string()
+                    self.create_key_value_table_ref(connx
+                            ,parted.to_string()
                             , self.parse_list(buf_reader)
-                            , connx
                     );
                 }
             },
