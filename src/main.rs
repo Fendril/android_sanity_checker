@@ -1,10 +1,11 @@
-use std::{env, path, sync::Arc};
+use std::{mem, env, path, sync::Arc, fs::ReadDir};
 use rfd;
 use sqlite::{self, ConnectionWithFullMutex};
 
-use yara::{self, Rules};
+use yara::{self, Rules, Compiler, YaraError, Error, IoErrorKind, Yara};
 
 use android_sanity_checker::androidparser;
+use yara_sys::ERROR_CACHE_PAGE_LOCKED;
 
 fn parse_path(path: String, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Rules>>) {
     let path = path::Path::new(path.as_str());
@@ -72,8 +73,6 @@ fn parse_ref(path: String, connx: Arc<ConnectionWithFullMutex>) {
         Ok(x)=> x,
         Err(err) => panic!("[Error] {}", err.to_string()),
     };
-    // println!("DEBUG {}", path.display());
-    // println!("{} | {} | {}", path.extension().is_some_and(|x| x.to_str().unwrap() == "txt"), validator_flag, path.is_file());
     if validator_flag && path.is_dir() == true {
         if let Ok(read_dir) = path.read_dir() {
             rayon::scope(|s| {
@@ -116,6 +115,42 @@ fn parse_ref(path: String, connx: Arc<ConnectionWithFullMutex>) {
     }
 }
 
+fn yara_rules_finder(path:String) -> Vec<String> {
+    let path = path::Path::new(path.as_str());
+    let validator_flag: bool = match path.try_exists() {
+        Ok(x) => x,
+        Err(err) => panic!("[Error] {}", err.to_string()),
+    };
+    let mut yara_rules_vec: Vec<String> = vec![];
+    if validator_flag && path.is_dir() == true {
+        if let Ok(read_dir) = path.read_dir() {
+            read_dir.into_iter().for_each(|each_dir| {
+                if let Ok(each_entry) = each_dir {
+                    if each_entry.file_type().unwrap().is_dir() {
+                        yara_rules_finder(each_entry.path().to_str().unwrap().to_string()).into_iter().for_each(|each_yara_rules_path| {
+                            yara_rules_vec.push(each_yara_rules_path);
+                        });
+                    }
+                    else if each_entry.file_type().unwrap().is_file() && each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "yar") {
+                        yara_rules_vec.push(each_entry.path().to_str().unwrap().to_string());
+                    }
+                }
+            });
+        }
+    }
+    yara_rules_vec
+}
+
+fn yara_rules_ingester(paths: Vec<String>) -> Result<Rules, YaraError> {
+    let mut yara_compiler = Compiler::new().unwrap();
+    paths.into_iter().for_each(|each_path| {
+        if let Ok(x) = yara_compiler.add_rules_file(each_path.as_str()){
+            mem::replace( &mut yara_compiler, x);
+        };
+    });
+    yara_compiler.compile_rules()
+}
+
 fn main() {
 
     // !! FOR DEBUG !!
@@ -141,27 +176,12 @@ fn main() {
     let _ = tip_message.show();
     let yara_rules = match rfd::FileDialog::new()
         .set_directory("/")
-        .pick_file() {
+        .pick_folder() {
         Some(f) => {
-            let yara_compiler = yara::Compiler::new();
-            if let Ok(yara_compiler) = yara_compiler {
-                if let Ok(yara_compiler) = yara_compiler.add_rules_file(f.as_path()) {
-                    if let Ok(yara_rules) = yara_compiler.compile_rules() {
-                        Some(Arc::new(yara_rules))
-                    }
-                    else {
-                        None
-                    }
-                }
-                else {
-                    None
-                }
-            }
-            else {
-                None
-            }
+            println!("Finding & compiling YARA rules. Please wait...");
+            yara_rules_ingester(yara_rules_finder(f.to_str().unwrap().to_string()))
         },
-        None => None,
+        None => Err(YaraError { kind: yara::YaraErrorKind::CouldNotOpenFile }),
     };
 
     let tip_message: rfd::MessageDialog = rfd::MessageDialog::new()
@@ -174,7 +194,7 @@ fn main() {
             .pick_folder() {
         Some(d) => {
             println!("Creating reference into SQLite DB. Please wait...");
-            parse_ref(String::from(d.to_str().unwrap()), Arc::clone(&connection))
+            parse_ref(String::from(d.to_str().unwrap()), Arc::clone(&connection));
         },
         None => panic!("No directory selected."),
     };
@@ -187,7 +207,8 @@ fn main() {
             .set_directory("/")
             .pick_folder() {
         Some(d) => {
-            if let Some(yara_rules) = yara_rules {
+            if let Ok(yara_rules) = yara_rules {
+                let yara_rules = Arc::new(yara_rules);
                 parse_path(String::from(d.to_str().unwrap()), Arc::clone(&connection), Some(Arc::clone(&yara_rules)));
             }
             else {
