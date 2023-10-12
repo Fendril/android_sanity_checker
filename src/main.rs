@@ -1,13 +1,12 @@
-use std::{mem, env, path, sync::Arc, fs::ReadDir};
+use std::{env, path, sync::Arc, };
 use rfd;
 use sqlite::{self, ConnectionWithFullMutex};
 
-use yara::{self, Rules, Compiler, YaraError, Error, IoErrorKind, Yara};
+use yara::{self, Rules, Compiler};
 
 use android_sanity_checker::androidparser;
-use yara_sys::ERROR_CACHE_PAGE_LOCKED;
 
-fn parse_path(path: String, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Rules>>) {
+fn parse_path(path: String, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Vec<Rules>>>) {
     let path = path::Path::new(path.as_str());
     let validator_flag = match path.try_exists() {
         Ok(x)=> x,
@@ -141,20 +140,22 @@ fn yara_rules_finder(path:String) -> Vec<String> {
     yara_rules_vec
 }
 
-fn yara_rules_ingester(paths: Vec<String>) -> Result<Rules, YaraError> {
-    let mut yara_compiler = Compiler::new().unwrap();
+fn yara_rules_ingester(paths: Vec<String>) -> Vec<Rules> {
+    let mut compiled_ruleset: Vec<Rules> = vec![];
     paths.into_iter().for_each(|each_path| {
-        if let Ok(x) = yara_compiler.add_rules_file(each_path.as_str()){
-            mem::replace( &mut yara_compiler, x);
-        };
+        if let Ok(yara_compiler) = Compiler::new().unwrap().add_rules_file(each_path) {
+            if let Ok(yara_rules) = yara_compiler.compile_rules() {
+                compiled_ruleset.push(yara_rules);
+            }
+        }
     });
-    yara_compiler.compile_rules()
+    compiled_ruleset
 }
 
 fn main() {
 
     // !! FOR DEBUG !!
-    env::set_var("RUST_BACKTRACE", "1");
+    //env::set_var("RUST_BACKTRACE", "1");
     // !! FOR DEBUG !!
 
     let connection = sqlite::Connection::open_with_full_mutex(":memory:");
@@ -181,7 +182,7 @@ fn main() {
             println!("Finding & compiling YARA rules. Please wait...");
             yara_rules_ingester(yara_rules_finder(f.to_str().unwrap().to_string()))
         },
-        None => Err(YaraError { kind: yara::YaraErrorKind::CouldNotOpenFile }),
+        None => vec![],
     };
 
     let tip_message: rfd::MessageDialog = rfd::MessageDialog::new()
@@ -207,7 +208,8 @@ fn main() {
             .set_directory("/")
             .pick_folder() {
         Some(d) => {
-            if let Ok(yara_rules) = yara_rules {
+            println!("Working on the Analyse. Please wait...");
+            if !yara_rules.is_empty() {
                 let yara_rules = Arc::new(yara_rules);
                 parse_path(String::from(d.to_str().unwrap()), Arc::clone(&connection), Some(Arc::clone(&yara_rules)));
             }
@@ -217,6 +219,7 @@ fn main() {
         },
         None => panic!("No directory selected."),
     };
+    println!("Work done. Check into each device directory to find reports.");
     // MainWindow::new().unwrap().run().unwrap();
 }
 
