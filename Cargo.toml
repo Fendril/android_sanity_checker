@@ -20,5 +20,4 @@ yara-sys = {version = "0.21.0", features=["vendored"]}
 #slint-build = "1.1.1"
 
 [env]
-#YARA_LIBRARY_PATH = "C:\\Users\\r.chivot\\Downloads\\yara64.exe"
 YARA_INCLUDE_DIR = "D:\\Experimentations\\Android\\libyara\\yara\\libyara\\include"
