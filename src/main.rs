@@ -3,11 +3,11 @@ use rfd;
 use sqlite::{self, ConnectionWithFullMutex};
 use regex::Regex;
 
-use yara::{self, Rules, Compiler};
+use yara::{self, Rules, Compiler, Scanner};
 
 use android_sanity_checker::androidparser;
 
-fn parse_path(path: String, connx: Arc<ConnectionWithFullMutex>, yara_checker: Arc<Rules>) {
+fn parse_path(path: String, connx: Arc<ConnectionWithFullMutex>, yara_checker: Arc<Vec<Rules>>) {
     let path = path::Path::new(path.as_str());
     let validator_flag = match path.try_exists() {
         Ok(x)=> x,
@@ -17,22 +17,25 @@ fn parse_path(path: String, connx: Arc<ConnectionWithFullMutex>, yara_checker: A
         if let Ok(read_dir) = path.read_dir() {
             rayon::scope(|s| {
                 read_dir.into_iter().for_each(|each_dir| {
-                    let mut yara_scanner = yara_checker.scanner().unwrap();
-                    yara_scanner.set_timeout(10);
-                    yara_scanner.set_flags(yara::ScanFlags::REPORT_RULES_MATCHING);
                     if let Ok(each_entry) = each_dir {
                         if each_entry.file_type().unwrap().is_dir() {
                             parse_path(String::from(each_entry.path().to_str().unwrap()), Arc::clone(&connx), yara_checker.clone()); 
                         }
                         else if each_entry.file_type().unwrap().is_file() && each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "txt") {
                             let local_connx = connx.clone();
-
+                            let mut vec_yara_scanner: Vec<Scanner> = vec![];
+                            yara_checker.iter().for_each(|yara_rules| {
+                                let mut yara_scanner = yara_rules.scanner().unwrap();
+                                yara_scanner.set_timeout(10);
+                                yara_scanner.set_flags(yara::ScanFlags::REPORT_RULES_MATCHING);
+                                vec_yara_scanner.push(yara_scanner);
+                            });
                             s.spawn(move |_| {
                                 // println!("[DEBUT] {}", each_entry.file_name().to_str().unwrap());
                                 let android_file_parser = androidparser::AndroidParser::new(each_entry.path().as_path());
                                 match android_file_parser {
                                     Ok(x) => {
-                                        x.go_parse(local_connx, yara_scanner);
+                                        x.go_parse(local_connx, vec_yara_scanner);
                                     },
                                     Err(err) => eprintln!("{err}"),
                                 };
@@ -48,8 +51,14 @@ fn parse_path(path: String, connx: Arc<ConnectionWithFullMutex>, yara_checker: A
         let android_file_parser = androidparser::AndroidParser::new(path);
         match android_file_parser {
             Ok(x) => {
-                let yara_scanner = yara_checker.scanner().unwrap();
-                x.go_parse(Arc::clone(&connx), yara_scanner);
+                let mut vec_yara_scanner: Vec<Scanner> = vec![];
+                yara_checker.iter().for_each(|yara_rules| {
+                    let mut yara_scanner = yara_rules.scanner().unwrap();
+                    yara_scanner.set_timeout(10);
+                    yara_scanner.set_flags(yara::ScanFlags::REPORT_RULES_MATCHING);
+                    vec_yara_scanner.push(yara_scanner);
+                });
+                x.go_parse(Arc::clone(&connx), vec_yara_scanner);
             },
             Err(err) => eprintln!("{err}"),
         };
@@ -135,6 +144,9 @@ fn yara_rules_ingester(paths: Vec<String>) -> Rules {
     // let mut compiled_ruleset: Vec<Rules> = vec![];
     let mut concat_rules = String::new();
     let mut ingested_rules: Vec<String> = vec![];
+    let mut inval_rules_counter: u32 = 0;
+    let mut skipped_rules_counter:u32 = 0;
+    let overall_yara_files = paths.len();
     let re = match Regex::new(r"^((?P<global>global)\s)?rule\s+(?P<identifier>\S+)\s?.*?\{?$") {
         Ok(x) => x,
         Err(err) => panic!("{}", err),
@@ -165,6 +177,7 @@ fn yara_rules_ingester(paths: Vec<String>) -> Rules {
                                         if crash_ingest_rules.contains(&x.1) || ingested_rules.contains(&x.1) {
                                             valid_rule_flag = false;
                                             println!("[SKIP] Duplicate identifier for rule {}", x.1);
+                                            skipped_rules_counter += 1;
                                         }
                                         else {
                                             valid_rule_flag = true;
@@ -177,6 +190,7 @@ fn yara_rules_ingester(paths: Vec<String>) -> Rules {
                                 else {
                                     valid_rule_flag = false;
                                     println!("[SKIP] rule {} is global", x.1.as_str());
+                                    inval_rules_counter += 1;
                                 }
                             },
                             None => {
@@ -209,15 +223,19 @@ fn yara_rules_ingester(paths: Vec<String>) -> Rules {
                         },
                         Err(err) => {
                             println!("[ERROR {}] on file => {}", err.kind.to_string(), each_path.as_str());
+                            inval_rules_counter += 1;
                         },
                     };
                 },
-                Err(err) => {
-                    println!("[ERROR Add Rules] on file {}\n========\n{}\n========\n", each_path.as_str(), err.to_string());
+                Err(_) => {
+                    println!("[ERROR Add Rules] => {}", each_path.as_str());
+                    inval_rules_counter += 1;
                 },
             };
         };
     });
+    println!("Executed from {}", env::current_dir().unwrap().to_str().unwrap());
+    println!("[REPORT] Skipped {}/{2} rule(s) file(s) containing duplicated.\n[REPORT] Skipped {}/{2} rule(s) file(s) containing error(s)", skipped_rules_counter, inval_rules_counter, overall_yara_files);
     let compiler = Compiler::new().unwrap();
     let _ = match compiler.add_rules_str(concat_rules.as_str()) {
         Ok(x) => {
@@ -235,6 +253,13 @@ fn main() {
     // !! FOR DEBUG !!
     env::set_var("RUST_BACKTRACE", "1");
     // !! FOR DEBUG !!
+
+    // Building YARA Resource
+    let yara_precompiled = include_bytes!("../resources/yara_precompiled.yara");
+    // 
+
+    let cursor_yara_precompiled = io::Cursor::new(yara_precompiled);
+    let yara_default_rules = Rules::load_from_stream(cursor_yara_precompiled).unwrap();
 
     let connection = sqlite::Connection::open_with_full_mutex(":memory:");
     // let connection = sqlite::Connection::open_with_full_mutex(r"D:\Experimentations\Android\test.sqlite");
@@ -258,13 +283,14 @@ fn main() {
         .pick_folder() {
         Some(f) => {
             println!("Finding & compiling YARA rules. Please wait...");
-            yara_rules_ingester(yara_rules_finder(f.to_str().unwrap().to_string()))
+            vec![yara_rules_ingester(yara_rules_finder(f.to_str().unwrap().to_string())), yara_default_rules]
         },
         _ => {
-            println!("No Yara rules, will continue with an empty Yara check.");
-            Compiler::new().unwrap().compile_rules().unwrap()
+            println!("No given Yara rules, will continue with known Yara rules.");
+            vec![Compiler::new().unwrap().compile_rules().unwrap(), yara_default_rules]
         },
     };
+    // let _ = yara_rules.save(format!("{}\\yara_precompiled.yara", env::current_dir().unwrap().to_str().unwrap()).as_str());
 
     let tip_message: rfd::MessageDialog = rfd::MessageDialog::new()
             .set_title("Information")
