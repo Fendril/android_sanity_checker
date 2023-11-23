@@ -1,7 +1,7 @@
 use std::{io::{self, BufRead, Error, Write}, fs, path, sync:: Arc};
 use regex::Regex;
 use sqlite::{self, ConnectionWithFullMutex, State};
-use yara::Rules;
+use yara::Scanner;
 
 pub struct AndroidParser {
     path_filename: String,
@@ -20,7 +20,7 @@ impl AndroidParser {
         };
     }
 
-    pub fn go_parse(&self, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Vec<Rules>>>){
+    pub fn go_parse(&self, connx: Arc<ConnectionWithFullMutex>, yara_checker: Scanner){
         let buf_reader = self.create_bufreader();
         if let Ok(x) = buf_reader {
             self.android_file_selector(x, connx, yara_checker);
@@ -77,7 +77,7 @@ impl AndroidParser {
         });
     }
 
-    fn compare_key_value(&self, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Vec<Rules>>>, entries: Vec<(String, String)>, table_to_select: String) {
+    fn compare_key_value(&self, connx: Arc<ConnectionWithFullMutex>, mut yara_checker: Scanner, entries: Vec<(String, String)>, table_to_select: String) {
         let query = format!("SELECT * FROM '{}' WHERE key=:key", table_to_select);
         let mut stmt = connx.prepare(query.as_str()).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
@@ -98,17 +98,14 @@ impl AndroidParser {
             if !flag {
                 let mut matched_rules_names = String::new();
                 flag = false;
-                if let Some(yara_rules) = &yara_checker {
-                    yara_rules.iter().for_each(|yara_x|{
-                        if let Ok(yara_matches) = yara_x.scan_mem(format!("{} {}", each_entry.0, each_entry.1).as_bytes(), 5){
-                            if !yara_matches.is_empty() {
-                                if !flag { flag = true; }
-                                yara_matches.into_iter().for_each(|x| {
-                                    matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
-                                });
-                            }
-                        };
-                    });
+                if let Ok(yara_matches) = yara_checker.scan_mem(format!("{} {}", each_entry.0, each_entry.1).as_bytes()){
+                    if !yara_matches.is_empty() {
+                        if !flag { flag = true; }
+                        yara_matches.into_iter().for_each(|x| {
+                            println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
+                            matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
+                        });
+                    }
                 };
                 if flag {
                     let _ = buf_writer.write_all(format!("{};{};{};true;{}\n", self.path_filename.as_str(), each_entry.0, each_entry.1, matched_rules_names.as_str()).as_bytes());
@@ -117,7 +114,7 @@ impl AndroidParser {
                     let _ = buf_writer.write_all(format!("{};{};{};false;\n", self.path_filename.as_str(), each_entry.0, each_entry.1).as_bytes());
                 }
             }
-        });
+        })
     }
     
     fn create_key_xvalues_table_ref(&self,connx: Arc<ConnectionWithFullMutex>, table_to_create: String, entries: Vec<Vec<(String, Vec<String>)>>) {
@@ -136,7 +133,7 @@ impl AndroidParser {
         });
     }
 
-    fn compare_key_xvalues(&self, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Vec<Rules>>>, entries: Vec<Vec<(String, Vec<String>)>>, table_to_select: String) {
+    fn compare_key_xvalues(&self, connx: Arc<ConnectionWithFullMutex>, mut yara_checker: Scanner, entries: Vec<Vec<(String, Vec<String>)>>, table_to_select: String) {
         let query = format!("SELECT * FROM {} WHERE key=:key", table_to_select);
         let mut stmt = connx.prepare(query).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
@@ -157,17 +154,14 @@ impl AndroidParser {
                     if !ref_values.contains(&each_value) {
                         let mut matched_rules_names = String::new();
                         let mut flag: bool = false;
-                        if let Some(yara_rules) = &yara_checker {
-                            yara_rules.iter().for_each(|yara_checker|{
-                                if let Ok(yara_matches) = yara_checker.scan_mem(format!("{} {}", mid_block.0, each_value).as_bytes(), 5){
-                                    if !yara_matches.is_empty() {
-                                        if !flag { flag = true; }
-                                        yara_matches.into_iter().for_each(|x| {
-                                            matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
-                                        });
-                                    }
-                                };
-                            });
+                        if let Ok(yara_matches) = yara_checker.scan_mem(format!("{} {}", mid_block.0, each_value).as_bytes()){
+                            if !yara_matches.is_empty() {
+                                if !flag { flag = true; }
+                                yara_matches.into_iter().for_each(|x| {
+                                    println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
+                                    matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
+                                });
+                            }
                         };
                         if flag {
                             let _ = buf_writer.write_all(format!("{};{};{};true;{}\n", self.path_filename.as_str(), mid_block.0, each_value, matched_rules_names.as_str()).as_bytes());
@@ -198,7 +192,7 @@ impl AndroidParser {
         });
     }
 
-    fn compare_key_3values(&self, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Vec<Rules>>>, table_to_select: String, entries: Vec<(String, String, String, String)>, header: String) {
+    fn compare_key_3values(&self, connx: Arc<ConnectionWithFullMutex>, mut yara_checker: Scanner, table_to_select: String, entries: Vec<(String, String, String, String)>, header: String) {
         let query = format!("SELECT * FROM '{}' WHERE {}=:key", table_to_select, header);
         let mut stmt = connx.prepare(query).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
@@ -223,23 +217,20 @@ impl AndroidParser {
             if !flag {
                 let mut matched_rules_names = String::new();
                 flag = false;
-                if let Some(yara_checker) = &yara_checker {
-                    yara_checker.iter().for_each(|yara_checker|{
-                        if let Ok(yara_matches) = yara_checker.scan_mem(format!("{} {} {} {}", each_entry.0, each_entry.1, each_entry.2, each_entry.3).as_bytes(), 5){
-                            if !yara_matches.is_empty() {
-                                if !flag { flag = true; }
-                                yara_matches.into_iter().for_each(|x| {
-                                    matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
-                                });
-                            }
-                        };
-                    });
+                if let Ok(yara_matches) = yara_checker.scan_mem(format!("{} {} {} {}", each_entry.0, each_entry.1, each_entry.2, each_entry.3).as_bytes()){
+                    if !yara_matches.is_empty() {
+                        if !flag { flag = true; }
+                        yara_matches.into_iter().for_each(|x| {
+                            println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
+                            matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
+                        });
+                    }
                 };
                 if flag {
                     let _ = buf_writer.write_all(format!("{};{};{};{};{};true;{}\n", self.path_filename.as_str(), each_entry.0, each_entry.1, each_entry.2, each_entry.3, matched_rules_names.as_str()).as_bytes());
                 }
                 else {
-                    let _ = buf_writer.write_all(format!("{};{};{};{};{};;\n", self.path_filename.as_str(), each_entry.0, each_entry.1, each_entry.2, each_entry.3).as_bytes());
+                    let _ = buf_writer.write_all(format!("{};{};{};{};{};false;\n", self.path_filename.as_str(), each_entry.0, each_entry.1, each_entry.2, each_entry.3).as_bytes());
                 }
             }
             let _ = stmt.reset();
@@ -265,7 +256,7 @@ impl AndroidParser {
         });
     }
 
-    fn compare_5values_block(&self, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Vec<Rules>>>, entries: Vec<[String; 5]>, table_to_select: String, header: String) {
+    fn compare_5values_block(&self, connx: Arc<ConnectionWithFullMutex>, mut yara_checker: Scanner, entries: Vec<[String; 5]>, table_to_select: String, header: String) {
         let query = format!("SELECT * FROM '{}' WHERE {}=:key", table_to_select, header);
         let mut stmt = connx.prepare(query).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
@@ -291,23 +282,20 @@ impl AndroidParser {
             if !flag {
                 let mut matched_rules_names = String::new();
                 flag = false;
-                if let Some(yara_checker) = &yara_checker {
-                    yara_checker.iter().for_each(|yara_checker|{
-                        if let Ok(yara_matches) = yara_checker.scan_mem(format!("{} {} {} {} {}", blocks[0], blocks[1], blocks[2], blocks[3], blocks[4]).as_bytes(), 5){
-                            if !yara_matches.is_empty() {
-                                if !flag { flag = true; }
-                                yara_matches.into_iter().for_each(|x| {
-                                    matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
-                                });
-                            }
-                        };
-                    });
+                if let Ok(yara_matches) = yara_checker.scan_mem(format!("{} {} {} {} {}", blocks[0], blocks[1], blocks[2], blocks[3], blocks[4]).as_bytes()){
+                    if !yara_matches.is_empty() {
+                        if !flag { flag = true; }
+                        yara_matches.into_iter().for_each(|x| {
+                            println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
+                            matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
+                        });
+                    }
                 };
                 if flag {
                     let _ = buf_writer.write_all(format!("{};{};{};{};{};{};true;{}\n", self.path_filename.as_str(), blocks[0], blocks[1], blocks[2], blocks[3], blocks[4], matched_rules_names.as_str()).as_bytes());
                 }
                 else {
-                    let _ = buf_writer.write_all(format!("{};{};{};{};{};{};;\n", self.path_filename.as_str(), blocks[0], blocks[1], blocks[2], blocks[3], blocks[4]).as_bytes());
+                    let _ = buf_writer.write_all(format!("{};{};{};{};{};{};false;\n", self.path_filename.as_str(), blocks[0], blocks[1], blocks[2], blocks[3], blocks[4]).as_bytes());
                 }
             }
             let _ = stmt.reset();
@@ -506,7 +494,7 @@ impl AndroidParser {
         results
     }
 
-    fn android_file_selector(&self, buf_reader: io::BufReader<fs::File>, connx: Arc<ConnectionWithFullMutex>, yara_checker: Option<Arc<Vec<Rules>>>) {
+    fn android_file_selector(&self, buf_reader: io::BufReader<fs::File>, connx: Arc<ConnectionWithFullMutex>, yara_checker: Scanner) {
         let path_filename = path::Path::new(&self.path_filename);
         match path_filename.file_name() {
             Some(x) => {

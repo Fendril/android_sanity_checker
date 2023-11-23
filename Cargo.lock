@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "android_sanity_checker"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "num_cpus",
  "rayon",
