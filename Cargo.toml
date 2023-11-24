@@ -7,14 +7,14 @@ edition = "2021"
 
 [dependencies]
 #slint = "1.1.1"
-num_cpus = "1.16.0"
-regex = "1.9.3"
-rfd = "0.11.4"
-sqlite = "0.31.1"
-rayon = "1.7.0"
-yara = "0.23.0"
-yara-sys = {version = "0.23.0", features=["vendored"]}
-
+num_cpus = { git = "https://github.com/seanmonstar/num_cpus.git", branch = "master" } #"1.16.0"
+regex = "~1.10"
+rfd = { git = "https://github.com/PolyMeilex/rfd.git", branch="master" } #"0.11.4"
+sqlite = { git = "https://github.com/stainless-steel/sqlite.git", branch = "main" } #"0.31.1"
+rayon = { git = "https://github.com/rayon-rs/rayon.git", branch = "master" } #"1.7.0"
+yara = { git = "https://github.com/Hugal31/yara-rust.git", branch = "master" }
+yara-sys = { git = "https://github.com/Hugal31/yara-rust.git", branch = "master", features=["vendored"] }
+infer = { git = "https://github.com/bojand/infer.git", branch = "master" }
 
 [build-dependencies]
 #slint-build = "1.1.1"

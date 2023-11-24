@@ -1,6 +1,6 @@
 use std::{io::{self, BufRead, Error, Write}, fs, path, sync:: Arc};
 use regex::Regex;
-use sqlite::{self, ConnectionWithFullMutex, State};
+use sqlite::{self, ConnectionThreadSafe, State};
 use yara::Scanner;
 
 pub struct AndroidParser {
@@ -20,14 +20,14 @@ impl AndroidParser {
         };
     }
 
-    pub fn go_parse(&self, connx: Arc<ConnectionWithFullMutex>, yara_checker: Vec<Scanner>){
+    pub fn go_parse(&self, connx: Arc<ConnectionThreadSafe>, yara_checker: Vec<Scanner>){
         let buf_reader = self.create_bufreader();
         if let Ok(x) = buf_reader {
             self.android_file_selector(x, connx, yara_checker);
         }
     }
 
-    pub fn go_ref(&self, connx: Arc<ConnectionWithFullMutex>) {
+    pub fn go_ref(&self, connx: Arc<ConnectionThreadSafe>) {
         let buf_reader = self.create_bufreader();
         if let Ok(x) = buf_reader {
             self.android_file_reference(x, connx);
@@ -62,7 +62,7 @@ impl AndroidParser {
         // return Err(Error::new(io::ErrorKind::InvalidData, "Error occured while creating the File buffer to write report"))
     }
 
-    fn create_key_value_table_ref(&self, connx: Arc<ConnectionWithFullMutex>, table_to_create: String, entries: Vec<(String, String)>, ) {
+    fn create_key_value_table_ref(&self, connx: Arc<ConnectionThreadSafe>, table_to_create: String, entries: Vec<(String, String)>, ) {
         let query_table = format!("CREATE TABLE '{}' (key TEXT, value TEXT)", table_to_create);
         let _ = connx.execute(query_table);
         let query_insert = format!("INSERT INTO '{}' (key, value) VALUES (:key, :value)", table_to_create);
@@ -77,7 +77,7 @@ impl AndroidParser {
         });
     }
 
-    fn compare_key_value(&self, connx: Arc<ConnectionWithFullMutex>, mut yara_checker: Vec<Scanner>, entries: Vec<(String, String)>, table_to_select: String) {
+    fn compare_key_value(&self, connx: Arc<ConnectionThreadSafe>, mut yara_checker: Vec<Scanner>, entries: Vec<(String, String)>, table_to_select: String) {
         let query = format!("SELECT * FROM '{}' WHERE key=:key", table_to_select);
         let mut stmt = connx.prepare(query.as_str()).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
@@ -103,7 +103,7 @@ impl AndroidParser {
                         if !yara_matches.is_empty() {
                             if !flag { flag = true; }
                             yara_matches.into_iter().for_each(|x| {
-                                println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
+                                // println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
                                 if !matched_rules_names.contains(format!("[{}]", x.identifier).as_str()) {
                                     matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
                                 }
@@ -121,7 +121,7 @@ impl AndroidParser {
         })
     }
     
-    fn create_key_xvalues_table_ref(&self,connx: Arc<ConnectionWithFullMutex>, table_to_create: String, entries: Vec<Vec<(String, Vec<String>)>>) {
+    fn create_key_xvalues_table_ref(&self,connx: Arc<ConnectionThreadSafe>, table_to_create: String, entries: Vec<Vec<(String, Vec<String>)>>) {
         let query_table = format!("CREATE TABLE '{}' (key TEXT, value TEXT)", table_to_create);
         let _ = connx.execute(query_table);
         let query_insert = format!("INSERT INTO '{}' (key, value) VALUES (:key, :value)", table_to_create);
@@ -137,7 +137,7 @@ impl AndroidParser {
         });
     }
 
-    fn compare_key_xvalues(&self, connx: Arc<ConnectionWithFullMutex>, mut yara_checker: Vec<Scanner>, entries: Vec<Vec<(String, Vec<String>)>>, table_to_select: String) {
+    fn compare_key_xvalues(&self, connx: Arc<ConnectionThreadSafe>, mut yara_checker: Vec<Scanner>, entries: Vec<Vec<(String, Vec<String>)>>, table_to_select: String) {
         let query = format!("SELECT * FROM {} WHERE key=:key", table_to_select);
         let mut stmt = connx.prepare(query).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
@@ -163,7 +163,7 @@ impl AndroidParser {
                                 if !yara_matches.is_empty() {
                                     if !flag { flag = true; }
                                     yara_matches.into_iter().for_each(|x| {
-                                        println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
+                                        // println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
                                         if !matched_rules_names.contains(format!("[{}]", x.identifier).as_str()) {
                                             matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
                                         }
@@ -183,7 +183,7 @@ impl AndroidParser {
         });
     }
 
-    fn create_key_3values_table_ref(&self, connx: Arc<ConnectionWithFullMutex>, table_to_create: String, entries: Vec<(String, String, String, String)>, headers: (String, String, String, String)) {
+    fn create_key_3values_table_ref(&self, connx: Arc<ConnectionThreadSafe>, table_to_create: String, entries: Vec<(String, String, String, String)>, headers: (String, String, String, String)) {
         let query_table = format!("CREATE TABLE '{table_to_create}' ({} TEXT, {} TEXT, {} TEXT, {} TEXT)", headers.0, headers.1, headers.2, headers.3);
         let _ = connx.execute(query_table);
         let query_insert = format!("INSERT INTO '{table_to_create}' ({}, {}, {}, {}) VALUES (:key, :val1, :val2, :val3)", headers.0, headers.1, headers.2, headers.3);
@@ -200,7 +200,7 @@ impl AndroidParser {
         });
     }
 
-    fn compare_key_3values(&self, connx: Arc<ConnectionWithFullMutex>, mut yara_checker: Vec<Scanner>, table_to_select: String, entries: Vec<(String, String, String, String)>, header: String) {
+    fn compare_key_3values(&self, connx: Arc<ConnectionThreadSafe>, mut yara_checker: Vec<Scanner>, table_to_select: String, entries: Vec<(String, String, String, String)>, header: String) {
         let query = format!("SELECT * FROM '{}' WHERE {}=:key", table_to_select, header);
         let mut stmt = connx.prepare(query).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
@@ -230,7 +230,7 @@ impl AndroidParser {
                         if !yara_matches.is_empty() {
                             if !flag { flag = true; }
                             yara_matches.into_iter().for_each(|x| {
-                                println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
+                                // println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
                                 if !matched_rules_names.contains(format!("[{}]", x.identifier).as_str()) {
                                     matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
                                 }
@@ -249,7 +249,7 @@ impl AndroidParser {
         });
     }
 
-    fn create_5values_block_table_ref(&self, connx: Arc<ConnectionWithFullMutex>, table_to_create: String, entries: Vec<[String; 5]>, headers: (String, String, String, String, String)) {
+    fn create_5values_block_table_ref(&self, connx: Arc<ConnectionThreadSafe>, table_to_create: String, entries: Vec<[String; 5]>, headers: (String, String, String, String, String)) {
         let query_table = format!("CREATE TABLE '{table_to_create}' ({} TEXT, {} TEXT, {} TEXT, {} TEXT, {} TEXT)", headers.0, headers.1, headers.2, headers.3, headers.4);
         let _ = connx.execute(query_table);
         let query_insert = format!("INSERT INTO '{table_to_create}' ({0}, {1}, {2}, {3}, {4}) VALUES (:{0}, :{1}, :{2}, :{3}, :{4})", headers.0, headers.1, headers.2, headers.3, headers.4);
@@ -268,7 +268,7 @@ impl AndroidParser {
         });
     }
 
-    fn compare_5values_block(&self, connx: Arc<ConnectionWithFullMutex>, mut yara_checker: Vec<Scanner>, entries: Vec<[String; 5]>, table_to_select: String, header: String) {
+    fn compare_5values_block(&self, connx: Arc<ConnectionThreadSafe>, mut yara_checker: Vec<Scanner>, entries: Vec<[String; 5]>, table_to_select: String, header: String) {
         let query = format!("SELECT * FROM '{}' WHERE {}=:key", table_to_select, header);
         let mut stmt = connx.prepare(query).unwrap();
         let mut buf_writer = match self.create_bufwriter() {
@@ -299,7 +299,7 @@ impl AndroidParser {
                         if !yara_matches.is_empty() {
                             if !flag { flag = true; }
                             yara_matches.into_iter().for_each(|x| {
-                                println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
+                                // println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
                                 if !matched_rules_names.contains(format!("[{}]", x.identifier).as_str()) {
                                     matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
                                 }
@@ -510,7 +510,7 @@ impl AndroidParser {
         results
     }
 
-    fn android_file_selector(&self, buf_reader: io::BufReader<fs::File>, connx: Arc<ConnectionWithFullMutex>, yara_checker: Vec<Scanner>) {
+    fn android_file_selector(&self, buf_reader: io::BufReader<fs::File>, connx: Arc<ConnectionThreadSafe>, yara_checker: Vec<Scanner>) {
         let path_filename = path::Path::new(&self.path_filename);
         match path_filename.file_name() {
             Some(x) => {
@@ -549,7 +549,7 @@ impl AndroidParser {
         };
     }
 
-    fn android_file_reference(&self, buf_reader: io::BufReader<fs::File>, connx: Arc<ConnectionWithFullMutex>) {
+    fn android_file_reference(&self, buf_reader: io::BufReader<fs::File>, connx: Arc<ConnectionThreadSafe>) {
         let path_filename = path::Path::new(&self.path_filename);
         match path_filename.file_name() {
             Some(x) => { 

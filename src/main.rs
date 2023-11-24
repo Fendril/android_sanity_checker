@@ -1,13 +1,14 @@
 use std::{env, path, sync::Arc, fs, io::{self, BufRead}};
 use rfd;
-use sqlite::{self, ConnectionWithFullMutex};
+use sqlite::{self, ConnectionThreadSafe};
 use regex::Regex;
+use infer;
 
 use yara::{self, Rules, Compiler, Scanner};
 
 use android_sanity_checker::androidparser;
 
-fn parse_path(path: String, connx: Arc<ConnectionWithFullMutex>, yara_checker: Arc<Vec<Rules>>) {
+fn parse_path(path: String, connx: Arc<ConnectionThreadSafe>, yara_checker: Arc<Vec<Rules>>) {
     let path = path::Path::new(path.as_str());
     let validator_flag = match path.try_exists() {
         Ok(x)=> x,
@@ -42,6 +43,30 @@ fn parse_path(path: String, connx: Arc<ConnectionWithFullMutex>, yara_checker: A
                                 // println!("[FIN] {}", each_entry.file_name().to_str().unwrap());
                             });
                         }
+                        else {
+                            if let Ok(Some(_)) = infer::get_from_path(each_entry.path().to_str().unwrap()) {
+                                let mut vec_yara_scanner: Vec<Scanner> = vec![];
+                                let mut matched_rules: String = String::new();
+                                yara_checker.iter().for_each(|yara_rules| {
+                                    let mut yara_scanner = yara_rules.scanner().unwrap();
+                                    yara_scanner.set_timeout(10);
+                                    yara_scanner.set_flags(yara::ScanFlags::REPORT_RULES_MATCHING);
+                                    vec_yara_scanner.push(yara_scanner);
+                                    vec_yara_scanner.iter_mut().for_each(|yara_scanner| {
+                                        if let Ok(yara_matches) = yara_scanner.scan_file(each_entry.path()){
+                                            if !yara_matches.is_empty() {
+                                                yara_matches.into_iter().for_each(|x| {
+                                                    if !matched_rules.contains(x.identifier) {
+                                                        matched_rules.push_str(format!("[{}]", x.identifier).as_str());
+                                                    }
+                                                });
+                                            }
+                                        };
+                                    });
+                                });
+                                println!("[REPORT] Yara matched => {}\n=>\t{}", each_entry.path().to_str().unwrap(), matched_rules);
+                            }
+                        }
                     }
                 });
             });
@@ -65,7 +90,7 @@ fn parse_path(path: String, connx: Arc<ConnectionWithFullMutex>, yara_checker: A
     }
 }
 
-fn parse_ref(path: String, connx: Arc<ConnectionWithFullMutex>) {
+fn parse_ref(path: String, connx: Arc<ConnectionThreadSafe>) {
     let path = path::Path::new(path.as_str());
     let validator_flag = match path.try_exists() {
         Ok(x)=> x,
@@ -248,22 +273,23 @@ fn yara_rules_ingester(paths: Vec<String>) -> Rules {
     };
 }
 
+// fn yara_media_checker(yara_checker: Arc<Vec<Rules>>, path: String) {
+
+// }
+
 fn main() {
 
     // !! FOR DEBUG !!
     env::set_var("RUST_BACKTRACE", "1");
     // !! FOR DEBUG !!
 
-    // Building YARA Resource
-    let yara_precompiled = include_bytes!("../resources/yara_precompiled.yara");
+    // Building YARA Resource at compile time
+    let yara_default_rules = Rules::load_from_stream(io::Cursor::new(include_bytes!("../resources/yara_precompiled.yara"))).unwrap();
     // 
 
-    let cursor_yara_precompiled = io::Cursor::new(yara_precompiled);
-    let yara_default_rules = Rules::load_from_stream(cursor_yara_precompiled).unwrap();
-
-    let connection = sqlite::Connection::open_with_full_mutex(":memory:");
-    // let connection = sqlite::Connection::open_with_full_mutex(r"D:\Experimentations\Android\test.sqlite");
-    let connection: Arc<ConnectionWithFullMutex> = match connection {
+    let connection = sqlite::Connection::open_thread_safe(":memory:");
+    // let connection = sqlite::Connection::open_thread_safe(r"D:\Experimentations\Android\test.sqlite");
+    let connection: Arc<ConnectionThreadSafe> = match connection {
         Ok(x) => Arc::new(x),
         Err(err) => panic!("{err}"),
     };
@@ -290,7 +316,10 @@ fn main() {
             vec![Compiler::new().unwrap().compile_rules().unwrap(), yara_default_rules]
         },
     };
+
+    // To Build a Yara precompiled uncomment below
     // let _ = yara_rules.save(format!("{}\\yara_precompiled.yara", env::current_dir().unwrap().to_str().unwrap()).as_str());
+    //
 
     let tip_message: rfd::MessageDialog = rfd::MessageDialog::new()
             .set_title("Information")
