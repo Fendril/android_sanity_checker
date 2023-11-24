@@ -104,7 +104,7 @@ impl AndroidParser {
                             if !flag { flag = true; }
                             yara_matches.into_iter().for_each(|x| {
                                 // println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
-                                if !matched_rules_names.contains(format!("[{}]", x.identifier).as_str()) {
+                                if !matched_rules_names.contains(format!("[{}]", x.identifier).as_str()) || !x.identifier.starts_with("math_entropy_") {
                                     matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
                                 }
                             });
@@ -164,7 +164,7 @@ impl AndroidParser {
                                     if !flag { flag = true; }
                                     yara_matches.into_iter().for_each(|x| {
                                         // println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
-                                        if !matched_rules_names.contains(format!("[{}]", x.identifier).as_str()) {
+                                        if !matched_rules_names.contains(format!("[{}]", x.identifier).as_str()) || !x.identifier.starts_with("math_entropy_") {
                                             matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
                                         }
                                     });
@@ -231,7 +231,7 @@ impl AndroidParser {
                             if !flag { flag = true; }
                             yara_matches.into_iter().for_each(|x| {
                                 // println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
-                                if !matched_rules_names.contains(format!("[{}]", x.identifier).as_str()) {
+                                if !matched_rules_names.contains(format!("[{}]", x.identifier).as_str()) || !x.identifier.starts_with("math_entropy_") {
                                     matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
                                 }
                             });
@@ -300,7 +300,7 @@ impl AndroidParser {
                             if !flag { flag = true; }
                             yara_matches.into_iter().for_each(|x| {
                                 // println!("[REPORT] Yara matched => {}\n=>\t{}", x.identifier, self.path_filename);
-                                if !matched_rules_names.contains(format!("[{}]", x.identifier).as_str()) {
+                                if !matched_rules_names.contains(format!("[{}]", x.identifier).as_str()) || !x.identifier.starts_with("math_entropy_") {
                                     matched_rules_names.push_str(format!("[{}]", x.identifier).as_str());
                                 }
                             });

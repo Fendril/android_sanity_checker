@@ -1,4 +1,4 @@
-use std::{env, path, sync::Arc, fs, io::{self, BufRead}};
+use std::{env::{self, current_dir}, path, sync::{Arc, Mutex}, fs::{self, File}, io::{self, BufRead, BufWriter, Write}, time::Instant};
 use rfd;
 use sqlite::{self, ConnectionThreadSafe};
 use regex::Regex;
@@ -8,7 +8,7 @@ use yara::{self, Rules, Compiler, Scanner};
 
 use android_sanity_checker::androidparser;
 
-fn parse_path(path: String, connx: Arc<ConnectionThreadSafe>, yara_checker: Arc<Vec<Rules>>) {
+fn parse_path(path: String, connx: Arc<ConnectionThreadSafe>, yara_checker: Arc<Vec<Rules>>, yara_report_file_mutexed: Arc<Mutex<BufWriter<File>>>) {
     let path = path::Path::new(path.as_str());
     let validator_flag = match path.try_exists() {
         Ok(x)=> x,
@@ -20,7 +20,7 @@ fn parse_path(path: String, connx: Arc<ConnectionThreadSafe>, yara_checker: Arc<
                 read_dir.into_iter().for_each(|each_dir| {
                     if let Ok(each_entry) = each_dir {
                         if each_entry.file_type().unwrap().is_dir() {
-                            parse_path(String::from(each_entry.path().to_str().unwrap()), Arc::clone(&connx), yara_checker.clone()); 
+                            parse_path(String::from(each_entry.path().to_str().unwrap()), Arc::clone(&connx), yara_checker.clone(), yara_report_file_mutexed.clone()); 
                         }
                         else if each_entry.file_type().unwrap().is_file() && each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "txt") {
                             let local_connx = connx.clone();
@@ -64,7 +64,10 @@ fn parse_path(path: String, connx: Arc<ConnectionThreadSafe>, yara_checker: Arc<
                                         };
                                     });
                                 });
-                                println!("[REPORT] Yara matched => {}\n=>\t{}", each_entry.path().to_str().unwrap(), matched_rules);
+                                if !matched_rules.is_empty() {
+                                    let mut garded_writer = yara_report_file_mutexed.lock().unwrap();
+                                    let _ = garded_writer.write_all(format!("{};{}\n", each_entry.path().to_str().unwrap(), matched_rules).as_bytes());
+                                }
                             }
                         }
                     }
@@ -259,7 +262,6 @@ fn yara_rules_ingester(paths: Vec<String>) -> Rules {
             };
         };
     });
-    println!("Executed from {}", env::current_dir().unwrap().to_str().unwrap());
     println!("[REPORT] Skipped {}/{2} rule(s) file(s) containing duplicated.\n[REPORT] Skipped {}/{2} rule(s) file(s) containing error(s)", skipped_rules_counter, inval_rules_counter, overall_yara_files);
     let compiler = Compiler::new().unwrap();
     let _ = match compiler.add_rules_str(concat_rules.as_str()) {
@@ -345,12 +347,20 @@ fn main() {
             .pick_folder() {
         Some(d) => {
             println!("Working on the Analyse. Please wait...");
+            let mut yara_report_file_writer = match fs::OpenOptions::new().read(true).write(true).append(true).create(true).open(path::Path::new(format!("{}/reported_yara_matches.csv", current_dir().unwrap().to_str().unwrap()).as_str())) {
+                Ok(file_handler) => io::BufWriter::new(file_handler),
+                Err(err) => panic!("{}", err.to_string()),
+            };
+            let _ = yara_report_file_writer.write_all("filename;yara_rulename\n".as_bytes());
+            let yara_report_file_mutexed = Arc::new(Mutex::new(yara_report_file_writer));
+            let start = Instant::now();
             let yara_rules = Arc::new(yara_rules);
-            parse_path(String::from(d.to_str().unwrap()), Arc::clone(&connection), Arc::clone(&yara_rules));
+            parse_path(String::from(d.to_str().unwrap()), Arc::clone(&connection), Arc::clone(&yara_rules), yara_report_file_mutexed.clone());
+            println!("Analyze duration : {} sec(s)", start.elapsed().as_secs_f64());
         },
         None => panic!("No directory selected."),
     };
-    println!("Work done. Check into each device directory to find reports.");
+    println!("[Work done]\nCheck into each device directory to find reports.\nAlso check at {}/reported_yara_matches.csv to find yara matches.", current_dir().unwrap().to_str().unwrap());
     // MainWindow::new().unwrap().run().unwrap();
 }
 
