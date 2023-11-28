@@ -46,28 +46,61 @@ fn parse_path(path: String, connx: Arc<ConnectionThreadSafe>, yara_checker: Arc<
                         else {
                             if let Ok(Some(_)) = infer::get_from_path(each_entry.path().to_str().unwrap()) {
                                 let mut vec_yara_scanner: Vec<Scanner> = vec![];
-                                let mut matched_rules: String = String::new();
+                                let mut matched_rules: (String, String, String) = (String::new(), String::new(), String::new());
                                 yara_checker.iter().for_each(|yara_rules| {
                                     let mut yara_scanner = yara_rules.scanner().unwrap();
                                     yara_scanner.set_timeout(10);
                                     yara_scanner.set_flags(yara::ScanFlags::REPORT_RULES_MATCHING);
                                     vec_yara_scanner.push(yara_scanner);
+                                });
+                                let local_yara_report_file_mutexed = yara_report_file_mutexed.clone();
+                                s.spawn( move |_| {
                                     vec_yara_scanner.iter_mut().for_each(|yara_scanner| {
                                         if let Ok(yara_matches) = yara_scanner.scan_file(each_entry.path()){
                                             if !yara_matches.is_empty() {
                                                 yara_matches.into_iter().for_each(|x| {
-                                                    if !matched_rules.contains(x.identifier) {
-                                                        matched_rules.push_str(format!("[{}]", x.identifier).as_str());
+                                                    if !matched_rules.0.contains(x.identifier) {
+                                                        if !( x.identifier.eq("with_sqlite") & each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "db") ) &
+                                                                !( (x.identifier.eq("ft_jar") | x.identifier.eq("ft_zip")) & each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "apk") ) &
+                                                                !( x.identifier.eq("ft_zip") & each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "zip") ) &
+                                                                !( x.identifier.eq("ft_gzip") & each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "gz") ) & 
+                                                                !( (x.identifier.eq("ft_elf") | x.identifier.eq("executable_elf32") | x.identifier.eq("executable_elf64")) & Regex::new(r"[\\/]system[\\/]bin.*$").unwrap().is_match(each_entry.path().to_str().unwrap()) ) {
+                                                            let mut tmp_desc = String::new();
+                                                            let mut tmp_ref = String::new();
+                                                            x.metadatas.iter().for_each(|y| {
+                                                                if y.identifier.contains("desc") || y.identifier.contains("description") {
+                                                                    let str = format!("{:?}", y.value);
+                                                                    tmp_desc.push_str(&format!("[{}]", &str[8..str.len()-2]));
+                                                                }
+                                                                if y.identifier.eq("url") || y.identifier.eq("reference") {
+                                                                    let str = format!("{:?}", y.value);
+                                                                    tmp_ref.push_str(&format!("[{}]", &str[8..str.len()-2]));
+                                                                }
+                                                            });
+                                                            if tmp_desc.is_empty() {
+                                                                matched_rules.1.push_str("[---]");
+                                                            }
+                                                            else {
+                                                                matched_rules.1.push_str(&tmp_desc);
+                                                            }
+                                                            if tmp_ref.is_empty() {
+                                                                matched_rules.2.push_str("[---]");
+                                                            }
+                                                            else {
+                                                                matched_rules.2.push_str(&tmp_ref);
+                                                            }
+                                                            matched_rules.0.push_str(format!("[{}]", x.identifier).as_str());
+                                                        }
                                                     }
                                                 });
                                             }
                                         };
                                     });
+                                    if !matched_rules.0.is_empty() {
+                                        let mut garded_writer = local_yara_report_file_mutexed.lock().unwrap();
+                                        let _ = garded_writer.write_all(format!("{};{};{};{}\n", each_entry.path().to_str().unwrap(), matched_rules.0, matched_rules.1, matched_rules.2).as_bytes());
+                                    }
                                 });
-                                if !matched_rules.is_empty() {
-                                    let mut garded_writer = yara_report_file_mutexed.lock().unwrap();
-                                    let _ = garded_writer.write_all(format!("{};{}\n", each_entry.path().to_str().unwrap(), matched_rules).as_bytes());
-                                }
                             }
                         }
                     }
@@ -296,10 +329,10 @@ fn main() {
         Err(err) => panic!("{err}"),
     };
 
-    let user_entries: Vec<String> = env::args().skip(1).map(|x| String::from(x)).collect();
-    for argument in user_entries {
-        println!("Passed arg : {}", argument);
-    }
+    // let user_entries: Vec<String> = env::args().skip(1).map(|x| String::from(x)).collect();
+    // for argument in user_entries {
+    //     println!("Passed arg : {}", argument);
+    // }
 
     let tip_message: rfd::MessageDialog = rfd::MessageDialog::new()
             .set_title("Information")
@@ -351,7 +384,7 @@ fn main() {
                 Ok(file_handler) => io::BufWriter::new(file_handler),
                 Err(err) => panic!("{}", err.to_string()),
             };
-            let _ = yara_report_file_writer.write_all("filename;yara_rulename\n".as_bytes());
+            let _ = yara_report_file_writer.write_all("filename;yara_rulename;yara_rule_description;yara_rule_url\n".as_bytes());
             let yara_report_file_mutexed = Arc::new(Mutex::new(yara_report_file_writer));
             let start = Instant::now();
             let yara_rules = Arc::new(yara_rules);
@@ -360,7 +393,7 @@ fn main() {
         },
         None => panic!("No directory selected."),
     };
-    println!("[Work done]\nCheck into each device directory to find reports.\nAlso check at {}/reported_yara_matches.csv to find yara matches.", current_dir().unwrap().to_str().unwrap());
+    println!("[Work done]\nCheck into each device directory to find reports.\nAlso check at {}\\reported_yara_matches.csv to find yara matches.", current_dir().unwrap().to_str().unwrap());
     // MainWindow::new().unwrap().run().unwrap();
 }
 
