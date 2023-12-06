@@ -1,6 +1,6 @@
 [package]
 name = "android_sanity_checker"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -15,6 +15,9 @@ rayon = { git = "https://github.com/rayon-rs/rayon.git", branch = "master" } #"1
 yara = { git = "https://github.com/Hugal31/yara-rust.git", branch = "master" }
 yara-sys = { git = "https://github.com/Hugal31/yara-rust.git", branch = "master", features=["vendored"] }
 infer = { git = "https://github.com/bojand/infer.git", branch = "master" }
+indicatif = { git = "https://github.com/console-rs/indicatif.git", branch = "main" }
+console = { git = "https://github.com/console-rs/console.git", branche = "master" }
+sha256 = { git = "https://github.com/baoyachi/sha256-rs.git", branch = "master" }
 
 [build-dependencies]
 #slint-build = "1.1.1"

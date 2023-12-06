@@ -35,7 +35,7 @@ Be sure to have a folder like this
             |_(...)
         |_Device_C
             |_(...)
---------
+--------|
 ```
 
 ## Future features
