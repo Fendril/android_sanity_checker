@@ -1,338 +1,15 @@
-use std::{env::{self, current_dir}, path, sync::{Arc, Mutex}, fs::{self, File}, io::{self, BufRead, BufWriter, Write}, time::Instant};
+use std::{env::current_dir, time::Instant};
 use rfd;
-use sqlite::{self, ConnectionThreadSafe};
-use regex::Regex;
-use infer;
+use indicatif::HumanDuration;
+use console::style;
 
-use yara::{self, Rules, Compiler, Scanner};
-
-use android_sanity_checker::androidparser;
-
-fn parse_path(path: String, connx: Arc<ConnectionThreadSafe>, yara_checker: Arc<Vec<Rules>>, yara_report_file_mutexed: Arc<Mutex<BufWriter<File>>>) {
-    let path = path::Path::new(path.as_str());
-    let validator_flag = match path.try_exists() {
-        Ok(x)=> x,
-        Err(err) => panic!("[Error] {}", err.to_string()),
-    };
-    if validator_flag && path.is_dir() == true {
-        if let Ok(read_dir) = path.read_dir() {
-            rayon::scope(|s| {
-                read_dir.into_iter().for_each(|each_dir| {
-                    if let Ok(each_entry) = each_dir {
-                        if each_entry.file_type().unwrap().is_dir() {
-                            parse_path(String::from(each_entry.path().to_str().unwrap()), Arc::clone(&connx), yara_checker.clone(), yara_report_file_mutexed.clone()); 
-                        }
-                        else if each_entry.file_type().unwrap().is_file() && each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "txt") {
-                            let local_connx = connx.clone();
-                            let mut vec_yara_scanner: Vec<Scanner> = vec![];
-                            yara_checker.iter().for_each(|yara_rules| {
-                                let mut yara_scanner = yara_rules.scanner().unwrap();
-                                yara_scanner.set_timeout(10);
-                                yara_scanner.set_flags(yara::ScanFlags::REPORT_RULES_MATCHING);
-                                vec_yara_scanner.push(yara_scanner);
-                            });
-                            s.spawn(move |_| {
-                                // println!("[DEBUT] {}", each_entry.file_name().to_str().unwrap());
-                                let android_file_parser = androidparser::AndroidParser::new(each_entry.path().as_path());
-                                match android_file_parser {
-                                    Ok(x) => {
-                                        x.go_parse(local_connx, vec_yara_scanner);
-                                    },
-                                    Err(err) => eprintln!("{err}"),
-                                };
-                                // println!("[FIN] {}", each_entry.file_name().to_str().unwrap());
-                            });
-                        }
-                        else {
-                            if let Ok(Some(_)) = infer::get_from_path(each_entry.path().to_str().unwrap()) {
-                                let mut vec_yara_scanner: Vec<Scanner> = vec![];
-                                let mut matched_rules: (String, String, String) = (String::new(), String::new(), String::new());
-                                yara_checker.iter().for_each(|yara_rules| {
-                                    let mut yara_scanner = yara_rules.scanner().unwrap();
-                                    yara_scanner.set_timeout(10);
-                                    yara_scanner.set_flags(yara::ScanFlags::REPORT_RULES_MATCHING);
-                                    vec_yara_scanner.push(yara_scanner);
-                                });
-                                let local_yara_report_file_mutexed = yara_report_file_mutexed.clone();
-                                s.spawn( move |_| {
-                                    vec_yara_scanner.iter_mut().for_each(|yara_scanner| {
-                                        if let Ok(yara_matches) = yara_scanner.scan_file(each_entry.path()){
-                                            if !yara_matches.is_empty() {
-                                                yara_matches.into_iter().for_each(|x| {
-                                                    if !matched_rules.0.contains(x.identifier) {
-                                                        if !( x.identifier.eq("with_sqlite") & each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "db") ) &
-                                                                !( (x.identifier.eq("ft_jar") | x.identifier.eq("ft_zip")) & each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "apk") ) &
-                                                                !( x.identifier.eq("ft_zip") & each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "zip") ) &
-                                                                !( x.identifier.eq("ft_gzip") & each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "gz") ) & 
-                                                                !( (x.identifier.eq("ft_elf") | x.identifier.eq("executable_elf32") | x.identifier.eq("executable_elf64")) & Regex::new(r"[\\/]system[\\/]bin.*$").unwrap().is_match(each_entry.path().to_str().unwrap()) ) {
-                                                            let mut tmp_desc = String::new();
-                                                            let mut tmp_ref = String::new();
-                                                            x.metadatas.iter().for_each(|y| {
-                                                                if y.identifier.contains("desc") || y.identifier.contains("description") {
-                                                                    let str = format!("{:?}", y.value);
-                                                                    tmp_desc.push_str(&format!("[{}]", &str[8..str.len()-2]));
-                                                                }
-                                                                if y.identifier.eq("url") || y.identifier.eq("reference") {
-                                                                    let str = format!("{:?}", y.value);
-                                                                    tmp_ref.push_str(&format!("[{}]", &str[8..str.len()-2]));
-                                                                }
-                                                            });
-                                                            if tmp_desc.is_empty() {
-                                                                matched_rules.1.push_str("[---]");
-                                                            }
-                                                            else {
-                                                                matched_rules.1.push_str(&tmp_desc);
-                                                            }
-                                                            if tmp_ref.is_empty() {
-                                                                matched_rules.2.push_str("[---]");
-                                                            }
-                                                            else {
-                                                                matched_rules.2.push_str(&tmp_ref);
-                                                            }
-                                                            matched_rules.0.push_str(format!("[{}]", x.identifier).as_str());
-                                                        }
-                                                    }
-                                                });
-                                            }
-                                        };
-                                    });
-                                    if !matched_rules.0.is_empty() {
-                                        let mut garded_writer = local_yara_report_file_mutexed.lock().unwrap();
-                                        let _ = garded_writer.write_all(format!("{};{};{};{}\n", each_entry.path().to_str().unwrap(), matched_rules.0, matched_rules.1, matched_rules.2).as_bytes());
-                                    }
-                                });
-                            }
-                        }
-                    }
-                });
-            });
-        }
-    }
-    else if path.extension().is_some_and(|x| x.to_str().unwrap() == "txt") && validator_flag && path.is_file() {
-        let android_file_parser = androidparser::AndroidParser::new(path);
-        match android_file_parser {
-            Ok(x) => {
-                let mut vec_yara_scanner: Vec<Scanner> = vec![];
-                yara_checker.iter().for_each(|yara_rules| {
-                    let mut yara_scanner = yara_rules.scanner().unwrap();
-                    yara_scanner.set_timeout(10);
-                    yara_scanner.set_flags(yara::ScanFlags::REPORT_RULES_MATCHING);
-                    vec_yara_scanner.push(yara_scanner);
-                });
-                x.go_parse(Arc::clone(&connx), vec_yara_scanner);
-            },
-            Err(err) => eprintln!("{err}"),
-        };
-    }
-}
-
-fn parse_ref(path: String, connx: Arc<ConnectionThreadSafe>) {
-    let path = path::Path::new(path.as_str());
-    let validator_flag = match path.try_exists() {
-        Ok(x)=> x,
-        Err(err) => panic!("[Error] {}", err.to_string()),
-    };
-    if validator_flag && path.is_dir() == true {
-        if let Ok(read_dir) = path.read_dir() {
-            rayon::scope(|s| {
-                for each_dir in read_dir {
-                    if let Ok(each_entry) = each_dir {
-                        if each_entry.file_type().unwrap().is_dir() {
-                            parse_ref(String::from(each_entry.path().to_str().unwrap()), Arc::clone(&connx)); 
-                        }
-                        else if each_entry.file_type().unwrap().is_file() && each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "txt") {
-                            let local_connx = connx.clone();
-                            s.spawn(move |_| {
-                                // println!("[DEBUT] {}", each_entry.file_name().to_str().unwrap());
-                                let android_file_parser = androidparser::AndroidParser::new(each_entry.path().as_path());
-                                match android_file_parser {
-                                    Ok(x) => {
-                                        x.go_ref(local_connx);
-                                    },
-                                    Err(err) => eprintln!("{err}"),
-                                };
-                                // println!("[FIN] {}", each_entry.file_name().to_str().unwrap());
-                            });
-                        }
-                    }
-                }
-            });
-        }
-    }
-    else if path.extension().is_some_and(|x| x.to_str().unwrap() == "txt") && validator_flag && path.is_file() {
-        let android_file_parser = androidparser::AndroidParser::new(path);
-        match android_file_parser {
-            Ok(x) => {
-                rayon::scope(|s| {
-                    s.spawn(|_| {
-                        x.go_ref(Arc::clone(&connx));
-                    });
-                });
-            },
-            Err(err) => eprintln!("{err}"),
-        };
-    }
-}
-
-fn yara_rules_finder(path:String) -> Vec<String> {
-    let path = path::Path::new(path.as_str());
-    let validator_flag: bool = match path.try_exists() {
-        Ok(x) => x,
-        Err(err) => panic!("[Error] {}", err.to_string()),
-    };
-    let mut yara_rules_vec: Vec<String> = vec![];
-    if validator_flag && path.is_dir() == true {
-        if let Ok(read_dir) = path.read_dir() {
-            read_dir.into_iter().for_each(|each_dir| {
-                if let Ok(each_entry) = each_dir {
-                    if each_entry.file_type().unwrap().is_dir() {
-                        yara_rules_finder(each_entry.path().to_str().unwrap().to_string()).into_iter().for_each(|each_yara_rules_path| {
-                            yara_rules_vec.push(each_yara_rules_path);
-                        });
-                    }
-                    else if each_entry.file_type().unwrap().is_file() && (each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "yar") || each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "yara")) {
-                        yara_rules_vec.push(each_entry.path().to_str().unwrap().to_string());
-                    }
-                }
-            });
-        }
-    }
-    yara_rules_vec
-}
-
-// fn yara_rules_ingester(paths: Vec<String>) -> Vec<Rules> {
-fn yara_rules_ingester(paths: Vec<String>) -> Rules {
-    // let mut compiled_ruleset: Vec<Rules> = vec![];
-    let mut concat_rules = String::new();
-    let mut ingested_rules: Vec<String> = vec![];
-    let mut inval_rules_counter: u32 = 0;
-    let mut skipped_rules_counter:u32 = 0;
-    let overall_yara_files = paths.len();
-    let re = match Regex::new(r"^((?P<global>global)\s)?rule\s+(?P<identifier>\S+)\s?.*?\{?$") {
-        Ok(x) => x,
-        Err(err) => panic!("{}", err),
-    };
-    // let mut compiler = Compiler::new().unwrap();
-    paths.into_iter().for_each(|each_path| {
-        // if let Ok(yara_compiler) = Compiler::new().unwrap().add_rules_file(each_path) {
-        if let Ok(file_handler) = fs::OpenOptions::new().read(true).write(false).create(false).open(path::Path::new(each_path.as_str())) {
-            let buf_reader = io::BufReader::new(file_handler);
-            let mut crash_string = String::new();
-            let mut crash_ingest_rules: Vec<String> = vec![];
-            let mut valid_rule_flag: bool = false;
-            buf_reader.lines().into_iter().for_each(|line| {
-                match line {
-                    Ok(l) => {
-                        let captures = match re.captures(l.as_str()) {
-                            Some(caps) => Some((caps.name("global").map_or("".to_string(), |m| String::from(m.as_str())),
-                                                        caps.name("identifier").map_or("".to_string(), |m| String::from(m.as_str())))),
-                            None => {
-                                None
-                            },
-                        };
-                        let _ = match captures {
-                            Some(x) => {
-                                if x.0.is_empty() {
-                                    // Si pas global, je traite
-                                    if !x.1.is_empty() {
-                                        if crash_ingest_rules.contains(&x.1) || ingested_rules.contains(&x.1) {
-                                            valid_rule_flag = false;
-                                            println!("[SKIP] Duplicate identifier for rule {}", x.1);
-                                            skipped_rules_counter += 1;
-                                        }
-                                        else {
-                                            valid_rule_flag = true;
-                                            crash_string.push_str(format!("{}\n", l.as_str()).as_str());
-                                            crash_ingest_rules.push(x.1);
-                                        }
-                                        // Si  j'ai un rule identifier, je flag et je traite.
-                                    }
-                                }
-                                else {
-                                    valid_rule_flag = false;
-                                    println!("[SKIP] rule {} is global", x.1.as_str());
-                                    inval_rules_counter += 1;
-                                }
-                            },
-                            None => {
-                                if l.starts_with("import ") {
-                                    crash_string.push_str(l.as_str());
-                                }
-                                if valid_rule_flag {
-                                    if l.starts_with("/*") {
-                                        valid_rule_flag = false;
-                                    }
-                                    else {
-                                        crash_string.push_str(format!("{}\n", l.as_str()).as_str());
-                                    }
-                                }
-                            },
-                        };
-                    },
-                    Err(err) => println!("[ERROR] {}", err.to_string()),
-                };
-            });
-            let yara_compiler = Compiler::new().unwrap().add_rules_str(&crash_string);
-            match yara_compiler {
-                Ok(yara_compiler) => {
-                    let _ = match yara_compiler.compile_rules() {
-                        Ok(_) => {
-                            concat_rules.push_str(format!("{}\n", crash_string).as_str());
-                            crash_ingest_rules.into_iter().for_each(|x| {
-                                ingested_rules.push(x);
-                            });
-                        },
-                        Err(err) => {
-                            println!("[ERROR {}] on file => {}", err.kind.to_string(), each_path.as_str());
-                            inval_rules_counter += 1;
-                        },
-                    };
-                },
-                Err(_) => {
-                    println!("[ERROR Add Rules] => {}", each_path.as_str());
-                    inval_rules_counter += 1;
-                },
-            };
-        };
-    });
-    println!("[REPORT] Skipped {}/{2} rule(s) file(s) containing duplicated.\n[REPORT] Skipped {}/{2} rule(s) file(s) containing error(s)", skipped_rules_counter, inval_rules_counter, overall_yara_files);
-    let compiler = Compiler::new().unwrap();
-    let _ = match compiler.add_rules_str(concat_rules.as_str()) {
-        Ok(x) => {
-            let _ = match x.compile_rules() {
-                Ok(z) => return z,
-                Err(err) => panic!("[ERROR] {}", err.kind.to_string()),
-            };
-        }
-        Err(err) => panic!("[ERROR] {}", err.to_string()),
-    };
-}
-
-// fn yara_media_checker(yara_checker: Arc<Vec<Rules>>, path: String) {
-
-// }
+use android_sanity_checker::androidparser::AndroidParser;
 
 fn main() {
 
     // !! FOR DEBUG !!
-    env::set_var("RUST_BACKTRACE", "1");
+    // env::set_var("RUST_BACKTRACE", "1");
     // !! FOR DEBUG !!
-
-    // Building YARA Resource at compile time
-    let yara_default_rules = Rules::load_from_stream(io::Cursor::new(include_bytes!("../resources/yara_precompiled.yara"))).unwrap();
-    // 
-
-    let connection = sqlite::Connection::open_thread_safe(":memory:");
-    // let connection = sqlite::Connection::open_thread_safe(r"D:\Experimentations\Android\test.sqlite");
-    let connection: Arc<ConnectionThreadSafe> = match connection {
-        Ok(x) => Arc::new(x),
-        Err(err) => panic!("{err}"),
-    };
-
-    // let user_entries: Vec<String> = env::args().skip(1).map(|x| String::from(x)).collect();
-    // for argument in user_entries {
-    //     println!("Passed arg : {}", argument);
-    // }
 
     let tip_message: rfd::MessageDialog = rfd::MessageDialog::new()
             .set_title("Information")
@@ -343,12 +20,17 @@ fn main() {
         .set_directory("/")
         .pick_folder() {
         Some(f) => {
-            println!("Finding & compiling YARA rules. Please wait...");
-            vec![yara_rules_ingester(yara_rules_finder(f.to_str().unwrap().to_string())), yara_default_rules]
+            println!("{} YARA folder => {}",
+                    style("[1/6]").bold().dim().green(),
+                    f.to_str().unwrap()
+            );
+            Some(String::from(f.to_str().unwrap()))
         },
         _ => {
-            println!("No given Yara rules, will continue with known Yara rules.");
-            vec![Compiler::new().unwrap().compile_rules().unwrap(), yara_default_rules]
+            println!("{} No given Yara rules, will continue with known Yara rules.",
+                    style("[1/6]").bold().dim().yellow()
+            );
+            None
         },
     };
 
@@ -361,39 +43,72 @@ fn main() {
             .set_description("Choose Reference directory")
             .set_buttons(rfd::MessageButtons::Ok);
     let _ = tip_message.show();
-    let _dir = match rfd::FileDialog::new()
+    let ref_dir = match rfd::FileDialog::new()
             .set_directory("/")
             .pick_folder() {
         Some(d) => {
-            println!("Creating reference into SQLite DB. Please wait...");
-            parse_ref(String::from(d.to_str().unwrap()), Arc::clone(&connection));
+            println!("{} Reference folder => {}",
+                    style("[2/6]").bold().dim().green(),
+                    d.to_str().unwrap()
+            );
+            String::from(d.to_str().unwrap())
         },
-        None => panic!("No directory selected."),
+        None => panic!("[ABORT] No reference directory selected."),
     };
     let tip_message: rfd::MessageDialog = rfd::MessageDialog::new()
             .set_title("Information")
             .set_description("Choose directory to Analyze")
             .set_buttons(rfd::MessageButtons::Ok);
     let _ = tip_message.show();
-    let _dir = match rfd::FileDialog::new()
+    let analysis_dir = match rfd::FileDialog::new()
             .set_directory("/")
             .pick_folder() {
         Some(d) => {
-            println!("Working on the Analyse. Please wait...");
-            let mut yara_report_file_writer = match fs::OpenOptions::new().read(true).write(true).append(true).create(true).open(path::Path::new(format!("{}/reported_yara_matches.csv", current_dir().unwrap().to_str().unwrap()).as_str())) {
-                Ok(file_handler) => io::BufWriter::new(file_handler),
-                Err(err) => panic!("{}", err.to_string()),
-            };
-            let _ = yara_report_file_writer.write_all("filename;yara_rulename;yara_rule_description;yara_rule_url\n".as_bytes());
-            let yara_report_file_mutexed = Arc::new(Mutex::new(yara_report_file_writer));
-            let start = Instant::now();
-            let yara_rules = Arc::new(yara_rules);
-            parse_path(String::from(d.to_str().unwrap()), Arc::clone(&connection), Arc::clone(&yara_rules), yara_report_file_mutexed.clone());
-            println!("Analyze duration : {} sec(s)", start.elapsed().as_secs_f64());
+            println!("{} Analysis directory => {}",
+                style("[3/6]").bold().dim().green(),
+                d.to_str().unwrap()
+        );
+            String::from(d.to_str().unwrap())
         },
-        None => panic!("No directory selected."),
+        None => panic!("[ABORT] No analysis directory selected."),
     };
-    println!("[Work done]\nCheck into each device directory to find reports.\nAlso check at {}\\reported_yara_matches.csv to find yara matches.", current_dir().unwrap().to_str().unwrap());
+    match yara_rules {
+        Some(_) => println!("{} Finding & compiling YARA rules.\n\tPlease wait...",
+                style("[4/6]").bold().dim().green()
+        ),
+        None => println!("{} Loading default Yara Rules.\n\t Please wait...",
+                style("[4/6]").bold().dim().yellow()
+        ),
+    };
+    let start_global = Instant::now();
+    if let Ok(android_parser) = AndroidParser::new(ref_dir,
+            analysis_dir,
+            yara_rules
+    ){
+        let mut start_step = Instant::now();
+        println!("{} Creating reference into SQLite DB.\n\tPlease wait...",
+                style("[5/6]").bold().dim().green()
+        );
+        android_parser.go_ref();
+        println!("Creating reference duration : {}",
+                HumanDuration(start_step.elapsed())
+        );
+        start_step = Instant::now();
+        println!("{} Working on the Analyse.\n\tPlease wait...",
+                style("[6/6]").bold().dim().green()
+        );
+        android_parser.go_parse();
+        println!("Analysis duration : {}",
+                HumanDuration(start_step.elapsed())
+        );
+    }
+    println!("Global duration : {}",
+          HumanDuration(start_global.elapsed())
+    );
+    println!("{}\nCheck into each device directory to find reports.\nAlso check at :\n\t{1}\\reported_yara_matches.csv\n\t{1}\\reported_binaries.csv\nto find yara matches.",
+            style("[WORK DONE]").bold().magenta(),
+            current_dir().unwrap().to_str().unwrap()
+    );
     // MainWindow::new().unwrap().run().unwrap();
 }
 
