@@ -21,14 +21,14 @@ fn main() {
         .pick_folder() {
         Some(f) => {
             println!("{} YARA folder => {}",
-                    style("[1/6]").bold().dim(),
+                    style("[1/6]").bold().dim().green(),
                     f.to_str().unwrap()
             );
             Some(String::from(f.to_str().unwrap()))
         },
         _ => {
             println!("{} No given Yara rules, will continue with known Yara rules.",
-                    style("[1/6]").bold().dim()
+                    style("[1/6]").bold().dim().yellow()
             );
             None
         },
@@ -48,7 +48,7 @@ fn main() {
             .pick_folder() {
         Some(d) => {
             println!("{} Reference folder => {}",
-                    style("[2/6]").bold().dim(),
+                    style("[2/6]").bold().dim().green(),
                     d.to_str().unwrap()
             );
             String::from(d.to_str().unwrap())
@@ -65,7 +65,7 @@ fn main() {
             .pick_folder() {
         Some(d) => {
             println!("{} Analysis directory => {}",
-                style("[3/6]").bold().dim(),
+                style("[3/6]").bold().dim().green(),
                 d.to_str().unwrap()
         );
             String::from(d.to_str().unwrap())
@@ -74,10 +74,10 @@ fn main() {
     };
     match yara_rules {
         Some(_) => println!("{} Finding & compiling YARA rules.\n\tPlease wait...",
-                style("[4/6]").bold().dim()
+                style("[4/6]").bold().dim().green()
         ),
         None => println!("{} Loading default Yara Rules.\n\t Please wait...",
-                style("[4/6]").bold().dim()
+                style("[4/6]").bold().dim().yellow()
         ),
     };
     let start_global = Instant::now();
@@ -87,7 +87,7 @@ fn main() {
     ){
         let mut start_step = Instant::now();
         println!("{} Creating reference into SQLite DB.\n\tPlease wait...",
-                style("[5/6]").bold().dim()
+                style("[5/6]").bold().dim().green()
         );
         android_parser.go_ref();
         println!("Creating reference duration : {}",
@@ -95,7 +95,7 @@ fn main() {
         );
         start_step = Instant::now();
         println!("{} Working on the Analyse.\n\tPlease wait...",
-                style("[6/6]").bold().dim()
+                style("[6/6]").bold().dim().green()
         );
         android_parser.go_parse();
         println!("Analysis duration : {}",

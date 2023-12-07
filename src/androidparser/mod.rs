@@ -5,17 +5,21 @@
 //! comparing against this DB.
 
 use std::{io::{Cursor, BufRead, BufReader, BufWriter, Error, ErrorKind, Write}, fs::{File, OpenOptions}, path::Path, sync::{Arc, Mutex}, env::current_dir};
+use rayon::ThreadPool;
 use regex::Regex;
 use sqlite::{ConnectionThreadSafe, State};
 use yara::{Rules, Scanner};
 use sha256;
+use console::style;
 
 pub struct AndroidParser {
     path_analyze: String,
     path_reference: String,
     yara_report_file_mutexed: Arc<Mutex<BufWriter<File>>>,
+    binaries_report_file_mutexed: Arc<Mutex<BufWriter<File>>>,
     yara_rules: Vec<Rules>,
-    connx: Arc<ConnectionThreadSafe>
+    connx: Arc<ConnectionThreadSafe>,
+    thread_pool: ThreadPool
 }
 
 impl AndroidParser {
@@ -60,7 +64,29 @@ impl AndroidParser {
                     Ok(file_handler) => Arc::new(Mutex::new(BufWriter::new(file_handler))),
                     Err(err) => panic!("{}", err.to_string()),
                 };
-                return Ok(Self {path_reference, path_analyze, yara_report_file_mutexed, yara_rules, connx})
+                let mut guarded_writer = yara_report_file_mutexed.lock().unwrap();
+                let _ = guarded_writer.write_all("filename;yara_rulename;yara_rule_description\n".as_bytes());
+                drop(guarded_writer);
+
+                let binaries_report_file_mutexed: Arc<Mutex<BufWriter<File>>> = match OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .append(true)
+                        .create(true)
+                        .open(Path::new(format!("{}/reported_binaries.csv",
+                                current_dir().unwrap().to_str().unwrap()).as_str())
+                        )
+                {
+                    Ok(file_handler) => Arc::new(Mutex::new(BufWriter::new(file_handler))),
+                    Err(err) => panic!("{}", err.to_string()),
+                };
+                let mut guarded_writer = binaries_report_file_mutexed.lock().unwrap();
+                let _ = guarded_writer.write_all("filename;sha256_sum;yara_match;yara_rulename\n".as_bytes());
+                drop(guarded_writer);
+
+                let thread_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+
+                return Ok(Self {path_reference, path_analyze, yara_report_file_mutexed, binaries_report_file_mutexed, yara_rules, connx, thread_pool})
             },
             false => return Err(Error::new(
                     ErrorKind::NotFound,
@@ -181,15 +207,19 @@ impl AndroidParser {
         let path = Path::new(path.as_str());
         let validator_flag = match path.try_exists() {
             Ok(x)=> x,
-            Err(err) => panic!("[Error] {}", err.to_string()),
+            Err(err) => panic!("{} {}",
+                    style("[ERROR]").bold().dim().red(),
+                    err.to_string()),
         };
         if validator_flag && path.is_dir() == true {
             if let Ok(read_dir) = path.read_dir() {
-                rayon::scope(|s| {
+                self.thread_pool.scope(|s| {
                     read_dir.into_iter().for_each(|each_dir| {
                         if let Ok(each_entry) = each_dir {
                             if each_entry.file_type().unwrap().is_dir() {
-                                self.parse_path(String::from(each_entry.path().to_str().unwrap())); 
+                                s.spawn(move |_| {
+                                    self.parse_path(String::from(each_entry.path().to_str().unwrap())); 
+                                });
                             }
                             else if each_entry.file_type().unwrap().is_file() &&
                                     ( each_entry.path().extension().is_some_and(|x| x.to_str().unwrap() == "txt") ||
@@ -289,13 +319,15 @@ impl AndroidParser {
         }
     }
 
-fn parse_ref(&self,
-        path: String)
-{
+    fn parse_ref(&self,
+            path: String)
+    {
     let path = Path::new(path.as_str());
     let validator_flag = match path.try_exists() {
         Ok(x)=> x,
-        Err(err) => panic!("[Error] {}", err.to_string()),
+        Err(err) => panic!("{} {}",
+                style("[ERROR]").bold().dim().red(),
+                err.to_string()),
     };
     if validator_flag && path.is_dir() {
         if let Ok(read_dir) = path.read_dir() {
@@ -313,7 +345,9 @@ fn parse_ref(&self,
                                 let _ = match self.create_bufreader(each_entry.path().as_path()){
                                     Ok(buf_reader) => self.android_file_reference(String::from(each_entry.path().to_str().unwrap()),
                                             buf_reader),
-                                    Err(err) => println!("[Error] {}", err),
+                                    Err(err) => println!("{} {}",
+                                            style("[Error]").bold().dim().red(),
+                                            err),
                                 };
                             });
                         }
@@ -812,11 +846,6 @@ fn parse_ref(&self,
         let query = format!("SELECT * FROM '{}' WHERE key=:key",
                 table_to_select);
         let mut stmt = self.connx.prepare(query.as_str()).unwrap();
-        let mut buf_writer = match self.create_bufwriter(&file_path) {
-            Ok(x) => x,
-            Err(err) => panic!("{}", err),
-        };
-        let _ = buf_writer.write_all("file_name;sha256_sum;yara_match;yara_rulename\n".as_bytes());
         let _ = stmt.bind((":key",
                 entries.0.as_str())
         );
@@ -853,11 +882,27 @@ fn parse_ref(&self,
                         });
                     }
                 };
+                if let Ok(yara_matches) = yara_scanner.scan_file(Path::new(&file_path)){
+                    if !yara_matches.is_empty() {
+                        if !flag { flag = true; }
+                        yara_matches.into_iter().for_each(|x| {
+                            if !matched_rules_names.contains(format!("[{}]",
+                                    x.identifier).as_str()
+                            ){
+                                matched_rules_names.push_str(format!("[{}]",
+                                            x.identifier
+                                        )
+                                    .as_str()
+                                );
+                            }
+                        });
+                    }
+                };
             });
+            let mut guarded_writer = self.binaries_report_file_mutexed.lock().unwrap();
             if flag {
-                let _ = buf_writer.write_all(format!("{};{};{};true;{}\n",
+                let _ = guarded_writer.write_all(format!("{};{};true;{}\n",
                             file_path.as_str(),
-                            entries.0,
                             entries.1,
                             matched_rules_names.as_str()
                         )
@@ -865,9 +910,8 @@ fn parse_ref(&self,
                 );
             }
             else {
-                let _ = buf_writer.write_all(format!("{};{};{};false;\n",
+                let _ = guarded_writer.write_all(format!("{};{};false;\n",
                             file_path.as_str(),
-                            entries.0,
                             entries.1
                         )
                         .as_bytes()
@@ -1283,6 +1327,7 @@ mod yara_customizer{
     use std::{fs::OpenOptions, path::Path, io::{BufRead, BufReader}};
     use yara::{Rules, Compiler};
     use regex::Regex;
+    use console::style;
 
 
     pub fn yara_rules_ingester(paths: Vec<String>) -> Rules
@@ -1370,7 +1415,8 @@ mod yara_customizer{
                                 },
                             };
                         },
-                        Err(err) => println!("[ERROR] {}",
+                        Err(err) => println!("{} {}",
+                                style("[ERROR]").bold().red(),
                                 err.to_string()
                         ),
                     };
@@ -1389,8 +1435,8 @@ mod yara_customizer{
                                 });
                             },
                             Err(err) => {
-                                println!("[ERROR {}] on file => {}",
-                                        err.kind.to_string(),
+                                println!("{} on file => {}",
+                                        style(format!("[ERROR {}]", err.kind.to_string())).bold().dim().red(),
                                         each_path.as_str()
                                 );
                                 inval_rules_counter += 1;
@@ -1398,7 +1444,8 @@ mod yara_customizer{
                         };
                     },
                     Err(_) => {
-                        println!("[ERROR Add Rules] => {}",
+                        println!("{} => {}",
+                                style("[ERROR Add Rules]").bold().dim().red(),
                                 each_path.as_str()
                         );
                         inval_rules_counter += 1;
@@ -1406,20 +1453,25 @@ mod yara_customizer{
                 };
             };
         });
-        println!("[REPORT] Skipped {}/{2} rule(s) file(s) containing duplicated.\n[REPORT] Skipped {}/{2} rule(s) file(s) containing error(s)",
-                skipped_rules_counter,
-                inval_rules_counter,
-                overall_yara_files
+        println!("{3} Skipped {}/{2} rule(s) file(s) containing duplicated.\n{3} Skipped {}/{2} rule(s) file(s) containing error(s)",
+                style(skipped_rules_counter).bold().dim().red(),
+                style(inval_rules_counter).bold().dim().red(),
+                style(overall_yara_files).dim().yellow(),
+                style("[REPORT]").bold().dim().magenta(),
         );
         let compiler = Compiler::new().unwrap();
         let _ = match compiler.add_rules_str(concat_rules.as_str()) {
             Ok(x) => {
                 let _ = match x.compile_rules() {
                     Ok(z) => return z,
-                    Err(err) => panic!("[ERROR] {}", err.kind.to_string()),
+                    Err(err) => panic!("{} {}",
+                            style("[ERROR]").bold().dim().red(),
+                            err.kind.to_string()),
                 };
             }
-            Err(err) => panic!("[ERROR] {}", err.to_string()),
+            Err(err) => panic!("{} {}",
+                    style("[ERROR]").bold().dim().red(),
+                    err.to_string()),
         };
     }
 
@@ -1427,7 +1479,9 @@ mod yara_customizer{
     {
         let validator_flag: bool = match path.try_exists() {
             Ok(x) => x,
-            Err(err) => panic!("[Error] {}", err.to_string()),
+            Err(err) => panic!("{} {}",
+                    style("[ERROR]]").bold().dim().red(),
+                    err.to_string()),
         };
         let mut yara_rules_vec: Vec<String> = vec![];
         if validator_flag &&
