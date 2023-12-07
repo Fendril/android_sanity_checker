@@ -105,7 +105,10 @@ fn main() {
     println!("Global duration : {}",
           HumanDuration(start_global.elapsed())
     );
-    println!("[Work done]\nCheck into each device directory to find reports.\nAlso check at {}\\reported_yara_matches.csv to find yara matches.", current_dir().unwrap().to_str().unwrap());
+    println!("{}\nCheck into each device directory to find reports.\nAlso check at :\n\t{1}\\reported_yara_matches.csv\n\t{1}\\reported_binaries.csv\nto find yara matches.",
+            style("[WORK DONE]").bold().magenta(),
+            current_dir().unwrap().to_str().unwrap()
+    );
     // MainWindow::new().unwrap().run().unwrap();
 }
 
