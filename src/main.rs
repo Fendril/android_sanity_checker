@@ -85,12 +85,15 @@ fn main() {
             analysis_dir,
             yara_rules
     ){
+        println!("\tYARA ingesting duration : {}", 
+                HumanDuration(start_global.elapsed())
+        );
         let mut start_step = Instant::now();
         println!("{} Creating reference into SQLite DB.\n\tPlease wait...",
                 style("[5/6]").bold().dim().green()
         );
         android_parser.go_ref();
-        println!("Creating reference duration : {}",
+        println!("\tCreating reference duration : {}",
                 HumanDuration(start_step.elapsed())
         );
         start_step = Instant::now();
@@ -98,11 +101,11 @@ fn main() {
                 style("[6/6]").bold().dim().green()
         );
         android_parser.go_parse();
-        println!("Analysis duration : {}",
+        println!("\tAnalysis duration : {}",
                 HumanDuration(start_step.elapsed())
         );
     }
-    println!("Global duration : {}",
+    println!("\tGlobal duration : {}",
           HumanDuration(start_global.elapsed())
     );
     println!("{}\nCheck into each device directory to find reports.\nAlso check at :\n\t{1}\\reported_yara_matches.csv\n\t{1}\\reported_binaries.csv\nto find yara matches.",

@@ -1,3 +1,5 @@
+![Static Badge](https://img.shields.io/badge/master-passing-lowgreen?logo=github)
+
 # android_sanity_checker
 
 ## What is it?
